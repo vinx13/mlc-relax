@@ -294,6 +294,14 @@ TVM_DLL Pass SplitCallTIRByPattern(Array<TIRPattern> patterns, FCodegen fcodegen
  */
 TVM_DLL Pass SimplifyNormInference();
 
+/*!
+ * \brief Dead code elimination.
+ * Currently it removes:
+ *   1. Unused local VarBindings in a DataflowBlock.
+ * \return The Pass.
+ */
+TVM_DLL Pass DeadCodeElimination();
+
 }  // namespace transform
 }  // namespace relax
 }  // namespace tvm

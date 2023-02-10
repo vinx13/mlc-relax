@@ -44,17 +44,26 @@ class DeadCodeEliminator : public ExprMutator {
     return GetRef<Expr>(op);
   }
 
+  void VisitBinding_(const VarBindingNode* binding) {
+    this->VisitExpr(binding->value);
+  }
+  
+  void VisitBinding_(const MatchCastNode* binding) {
+    this->VisitExpr(binding->value);
+    this->VisitAndCheckStructInfoFieldUnchanged(binding->struct_info);
+  }
+
   BindingBlock VisitBindingBlock_(const DataflowBlockNode* block) final {
     // reverse scan the data flow block to find the used vars
     used_vars_.clear();
     std::vector<Binding> new_bindings;
     for (auto rit = block->bindings.rbegin(); rit != block->bindings.rend(); rit++) {
       const Var& var = (*rit)->var;
-      // collect the used vars
-      this->VisitBinding(*rit);
       // only keep the used bindings or non dataflow var bindings
       if (used_vars_.count(var) || !var->IsInstance<DataflowVarNode>()) {
         new_bindings.push_back(*rit);
+        // collect the used vars
+        this->VisitBinding((*rit));
       }
     }
     // reverse the bindings

@@ -533,6 +533,19 @@ def LiftTransformParams() -> tvm.ir.transform.Pass:
     return _ffi_api.LiftTransformParams()  # type: ignore
 
 
+def DeadCodeElimination() -> tvm.ir.transform.Pass:
+    """Remove dead code in the program.
+    Currently it removes:
+        1. Unused local VarBindings in a DataflowBlock.
+
+    Returns
+    -------
+    ret : tvm.transform.Pass
+        The registered pass.
+    """
+    return _ffi_api.DeadCodeElimination()  # type: ignore
+
+
 def SimplifyNormInference() -> tvm.ir.transform.Pass:
     """Simplify normalization operators during inference. For example, the result
     of a batch norm which is indexed at tuple index 0 will be unpacked into a
