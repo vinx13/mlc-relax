@@ -16,6 +16,8 @@
 # under the License.
 # pylint: disable=invalid-name
 """GEMM kernel generator and profiler for CUTLASS."""
+import os
+import pickle
 from .gemm_operation import GemmOperation, EmitGemmInstance
 from .gemm_profiler import GemmProfilerEmitter
 from .gen_tensor_op import ProfilerEngine, GENERATOR_FUNC_TABLE, EPILOGUE_MAP
@@ -174,7 +176,11 @@ class CutlassGemmProfiler:
         assert sm in GENERATOR_FUNC_TABLE and sm in DEFAULT_KERNELS, "sm%d not supported yet." % sm
         self.engine = ProfilerEngine(sm, cutlass_path, binary_path)
         self.sm = sm
-        self.cache = {}
+        self.cache_path = os.path.join(binary_path, "cutlass_gemm_cache.pickle")
+        if os.path.exists(self.cache_path):
+            self.cache = pickle.load(open(self.cache_path, "rb"))
+        else:
+            self.cache = {}
 
     def get_default(
         self,
@@ -247,8 +253,19 @@ class CutlassGemmProfiler:
         Profile and select the best kernel from candidate kernels.
         See the documentation for the profile method below.
         """
-        if (M, N, K) in self.cache:
-            op = self.cache[(M, N, K)]
+        workload = (
+            M,
+            N,
+            K,
+            out_dtype,
+            arg0_dtype,
+            arg1_dtype,
+            out_layout,
+            arg0_layout,
+            arg1_layout,
+        )
+        if workload in self.cache:
+            op = self.cache[workload]
             return op
 
         # TODO(masahi): CUTLASS alignment check on gemm kernels is too restrictive.
@@ -277,11 +294,13 @@ class CutlassGemmProfiler:
             out = self.engine.evaluate(op, [M, N, K])
             op["runtime"] = out
             if out < float("inf") and find_first_valid:
-                self.cache[(M, N, K)] = op
+                self.cache[workload] = op
                 return op
 
         op = min(ops, key=lambda i: i["runtime"])
-        self.cache[(M, N, K)] = op
+        self.cache[workload] = op
+        with open(self.cache_path, "wb") as f:
+            pickle.dump(self.cache, f)
         return op
 
     def profile(

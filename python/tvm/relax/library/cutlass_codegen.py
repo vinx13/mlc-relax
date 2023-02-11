@@ -75,160 +75,180 @@ OP_PATTERN_ATTR_LIST = {
 }
 
 
-def cutlass_codegen_with_match_results(match_results: List[MatchResult]):
-    """generate cutlass code with match results"""
-    assert len(match_results) > 0
-    # add shape into attr
-    if match_results[0].pattern in DENSE_LIST:
-        A_dense, B_dense, C_dense = match_results[0].matched_buffers
-        m, n, k = A_dense.shape[0], B_dense.shape[1], A_dense.shape[1]
-        attr: Dict[Any, Any] = OP_PATTERN_ATTR_LIST[match_results[0].pattern]
-        attr["m"] = m
-        attr["n"] = n
-        attr["k"] = k
-    elif match_results[0].pattern in BATCH_DENSE_LIST:
-        A_dense, B_dense, C_dense = match_results[0].matched_buffers
-        _, m, k = A_dense.shape
-        n = B_dense.shape[-1]
-        attr = OP_PATTERN_ATTR_LIST[match_results[0].pattern]
-        attr["m"] = m
-        attr["n"] = n
-        attr["k"] = k
-    elif len(match_results) >= 1 and match_results[1].pattern in CONV2D_LIST:
-        A_conv2d, B_conv2d, C_conv2d = match_results[1].matched_buffers
-        d = A_conv2d.shape
-        w = B_conv2d.shape
-        attr = OP_PATTERN_ATTR_LIST[match_results[1].pattern]
-        attr["d"] = d
-        attr["w"] = w
-    else:
+def cutlass_fcodegen(sm=80, bin_dir="./bin"):
+    gemm_profiler = CutlassGemmProfiler(sm, _get_cutlass_path(), bin_dir)
+    conv2d_profiler = CutlassConv2DProfiler(sm, _get_cutlass_path(), bin_dir)
+
+    def cutlass_codegen_with_match_results(match_results: List[MatchResult]):
+        """generate cutlass code with match results"""
+        nonlocal gemm_profiler
+        nonlocal conv2d_profiler
+
+        assert len(match_results) > 0
+        # add shape into attr
+
+        if match_results[0].pattern in DENSE_LIST:
+            A_dense, B_dense, C_dense = match_results[0].matched_buffers
+            m, n, k = A_dense.shape[0], B_dense.shape[1], A_dense.shape[1]
+            attr: Dict[Any, Any] = OP_PATTERN_ATTR_LIST[match_results[0].pattern]
+            attr["m"] = m
+            attr["n"] = n
+            attr["k"] = k
+        elif match_results[0].pattern in BATCH_DENSE_LIST:
+            A_dense, B_dense, C_dense = match_results[0].matched_buffers
+            _, m, k = A_dense.shape
+            n = B_dense.shape[-1]
+            attr = OP_PATTERN_ATTR_LIST[match_results[0].pattern]
+            attr["m"] = m
+            attr["n"] = n
+            attr["k"] = k
+        elif len(match_results) >= 1 and match_results[1].pattern in CONV2D_LIST:
+            A_conv2d, B_conv2d, C_conv2d = match_results[1].matched_buffers
+            d = A_conv2d.shape
+            w = B_conv2d.shape
+            attr = OP_PATTERN_ATTR_LIST[match_results[1].pattern]
+            attr["d"] = d
+            attr["w"] = w
+        else:
+            return ["", 0]
+
+        attr["gemm_profiler"] = gemm_profiler
+        attr["conv2d_profiler"] = conv2d_profiler
+
+        if len(match_results) >= 3:
+            if (
+                match_results[0].pattern in DENSE_LIST
+                and match_results[1].pattern == bias_row_fp16
+                and match_results[2].pattern == relu_fp16
+            ):
+                # dense + bias + relu
+                m_dense, n_dense, k_dense = match_results[0].symbol_values
+                m_bias, n_bias = match_results[1].symbol_values
+                m_relu, n_relu = match_results[2].symbol_values
+                A_dense, B_dense, C_dense = match_results[0].matched_buffers
+                A_bias, B_bias, C_bias = match_results[1].matched_buffers
+                A_relu, B_relu = match_results[2].matched_buffers
+                if (
+                    m_dense == m_bias
+                    and n_dense == n_bias
+                    and m_dense == m_relu
+                    and n_dense == n_relu
+                    and C_dense == A_bias
+                    and C_bias == A_relu
+                ):
+                    attr["op_type"] = "cutlass.dense_bias_relu"
+                    return [_get_graph_pattern_cutlass_code(attr=attr), 3]
+        if len(match_results) >= 2:
+            # dense + bias
+            if match_results[0].pattern in DENSE_LIST and match_results[1].pattern == bias_row_fp16:
+                m_dense, n_dense, k_dense = match_results[0].symbol_values
+                m_bias, n_bias = match_results[1].symbol_values
+                A_dense, B_dense, C_dense = match_results[0].matched_buffers
+                A_bias, B_bias, C_bias = match_results[1].matched_buffers
+                if m_dense == m_bias and n_dense == n_bias and C_dense == A_bias:
+                    attr["op_type"] = "cutlass.dense_bias"
+                    return [_get_graph_pattern_cutlass_code(attr=attr), 2]
+            # batch_dense + batch_bias
+            if (
+                match_results[0].pattern in BATCH_DENSE_LIST
+                and match_results[1].pattern == batch_bias_row_fp16
+            ):
+                m_dense, n_dense, k_dense, b_dense = match_results[0].symbol_values
+                m_bias, n_bias, b_bias = match_results[1].symbol_values
+                A_dense, B_dense, C_dense = match_results[0].matched_buffers
+                A_bias, B_bias, C_bias = match_results[1].matched_buffers
+                if (
+                    b_dense == b_bias
+                    and m_dense == m_bias
+                    and n_dense == n_bias
+                    and C_dense == A_bias
+                ):
+                    attr["op_type"] = "cutlass.batch_matmul_bias"
+                    return [_get_graph_pattern_cutlass_code(attr=attr), 2]
+            # padding2d_NHWC + conv2d_NHWC
+            if (
+                match_results[0].pattern in [padding_2d_nhwc_fp16, copy_4d_nhwc_fp16]
+                and match_results[1].pattern == conv2d_nhwc_fp16
+            ):
+                if match_results[0].pattern == padding_2d_nhwc_fp16:
+                    (
+                        N_pad,
+                        H_pad,
+                        W_pad,
+                        C_pad,
+                        pH_pad,
+                        pW_pad,
+                        lH_pad,
+                        lW_pad,
+                        rH_pad,
+                        rW_pad,
+                    ) = match_results[0].symbol_values
+                else:
+                    (
+                        N_pad,
+                        H_pad,
+                        W_pad,
+                        C_pad,
+                    ) = match_results[0].symbol_values
+                    pH_pad = rH_pad = H_pad
+                    pW_pad = rW_pad = W_pad
+                    lH_pad = lW_pad = 0
+                (
+                    N_conv,
+                    pH_conv,
+                    pW_conv,
+                    H_conv,
+                    W_conv,
+                    C_conv,
+                    O_conv,
+                    KH_conv,
+                    KW_conv,
+                    stride_h_conv,
+                    stride_w_conv,
+                    dilation_h_conv,
+                    dilation_w_conv,
+                ) = match_results[1].symbol_values
+                A, A_pad = match_results[0].matched_buffers
+                A_pad_conv, B_conv, out_conv = match_results[1].matched_buffers
+                if (
+                    N_pad == N_conv
+                    and pH_pad == pH_conv
+                    and pW_pad == pW_conv
+                    and C_pad == C_conv
+                    and A_pad == A_pad_conv
+                ):
+                    if (
+                        lH_pad == pH_pad - rH_pad
+                        and lW_pad == pW_pad - rW_pad
+                        and lH_pad + H_pad == rH_pad
+                        and lW_pad + W_pad == rW_pad
+                    ):
+                        padding = (lH_pad, lW_pad)
+                        strides = (stride_h_conv, stride_w_conv)
+                        dilation = (dilation_h_conv, dilation_w_conv)
+                        attr["padding"] = padding
+                        attr["strides"] = strides
+                        attr["dilation"] = dilation
+                        attr["op_type"] = "cutlass.conv2d"
+                        return [_get_graph_pattern_cutlass_code(attr=attr), 2]
+        if len(match_results) >= 1:
+            if match_results[0].pattern in DENSE_LIST:
+                # dense
+                attr["op_type"] = "cutlass.dense"
+                return [_get_graph_pattern_cutlass_code(attr=attr), 1]
+            elif match_results[0].pattern in BATCH_DENSE_LIST:
+                # batch_dense
+                attr["op_type"] = "cutlass.batch_matmul"
+                return [_get_graph_pattern_cutlass_code(attr=attr), 1]
         return ["", 0]
 
-    if len(match_results) >= 3:
-        if (
-            match_results[0].pattern in DENSE_LIST
-            and match_results[1].pattern == bias_row_fp16
-            and match_results[2].pattern == relu_fp16
-        ):
-            # dense + bias + relu
-            m_dense, n_dense, k_dense = match_results[0].symbol_values
-            m_bias, n_bias = match_results[1].symbol_values
-            m_relu, n_relu = match_results[2].symbol_values
-            A_dense, B_dense, C_dense = match_results[0].matched_buffers
-            A_bias, B_bias, C_bias = match_results[1].matched_buffers
-            A_relu, B_relu = match_results[2].matched_buffers
-            if (
-                m_dense == m_bias
-                and n_dense == n_bias
-                and m_dense == m_relu
-                and n_dense == n_relu
-                and C_dense == A_bias
-                and C_bias == A_relu
-            ):
-                attr["op_type"] = "cutlass.dense_bias_relu"
-                return [_get_graph_pattern_cutlass_code(attr=attr), 3]
-    if len(match_results) >= 2:
-        # dense + bias
-        if match_results[0].pattern in DENSE_LIST and match_results[1].pattern == bias_row_fp16:
-            m_dense, n_dense, k_dense = match_results[0].symbol_values
-            m_bias, n_bias = match_results[1].symbol_values
-            A_dense, B_dense, C_dense = match_results[0].matched_buffers
-            A_bias, B_bias, C_bias = match_results[1].matched_buffers
-            if m_dense == m_bias and n_dense == n_bias and C_dense == A_bias:
-                attr["op_type"] = "cutlass.dense_bias"
-                return [_get_graph_pattern_cutlass_code(attr=attr), 2]
-        # batch_dense + batch_bias
-        if (
-            match_results[0].pattern in BATCH_DENSE_LIST
-            and match_results[1].pattern == batch_bias_row_fp16
-        ):
-            m_dense, n_dense, k_dense, b_dense = match_results[0].symbol_values
-            m_bias, n_bias, b_bias = match_results[1].symbol_values
-            A_dense, B_dense, C_dense = match_results[0].matched_buffers
-            A_bias, B_bias, C_bias = match_results[1].matched_buffers
-            if b_dense == b_bias and m_dense == m_bias and n_dense == n_bias and C_dense == A_bias:
-                attr["op_type"] = "cutlass.batch_matmul_bias"
-                return [_get_graph_pattern_cutlass_code(attr=attr), 2]
-        # padding2d_NHWC + conv2d_NHWC
-        if (
-            match_results[0].pattern in [padding_2d_nhwc_fp16, copy_4d_nhwc_fp16]
-            and match_results[1].pattern == conv2d_nhwc_fp16
-        ):
-            if match_results[0].pattern == padding_2d_nhwc_fp16:
-                (
-                    N_pad,
-                    H_pad,
-                    W_pad,
-                    C_pad,
-                    pH_pad,
-                    pW_pad,
-                    lH_pad,
-                    lW_pad,
-                    rH_pad,
-                    rW_pad,
-                ) = match_results[0].symbol_values
-            else:
-                (
-                    N_pad,
-                    H_pad,
-                    W_pad,
-                    C_pad,
-                ) = match_results[0].symbol_values
-                pH_pad = rH_pad = H_pad
-                pW_pad = rW_pad = W_pad
-                lH_pad = lW_pad = 0
-            (
-                N_conv,
-                pH_conv,
-                pW_conv,
-                H_conv,
-                W_conv,
-                C_conv,
-                O_conv,
-                KH_conv,
-                KW_conv,
-                stride_h_conv,
-                stride_w_conv,
-                dilation_h_conv,
-                dilation_w_conv,
-            ) = match_results[1].symbol_values
-            A, A_pad = match_results[0].matched_buffers
-            A_pad_conv, B_conv, out_conv = match_results[1].matched_buffers
-            if (
-                N_pad == N_conv
-                and pH_pad == pH_conv
-                and pW_pad == pW_conv
-                and C_pad == C_conv
-                and A_pad == A_pad_conv
-            ):
-                if (
-                    lH_pad == pH_pad - rH_pad
-                    and lW_pad == pW_pad - rW_pad
-                    and lH_pad + H_pad == rH_pad
-                    and lW_pad + W_pad == rW_pad
-                ):
-                    padding = (lH_pad, lW_pad)
-                    strides = (stride_h_conv, stride_w_conv)
-                    dilation = (dilation_h_conv, dilation_w_conv)
-                    attr["padding"] = padding
-                    attr["strides"] = strides
-                    attr["dilation"] = dilation
-                    attr["op_type"] = "cutlass.conv2d"
-                    return [_get_graph_pattern_cutlass_code(attr=attr), 2]
-    if len(match_results) >= 1:
-        if match_results[0].pattern in DENSE_LIST:
-            # dense
-            attr["op_type"] = "cutlass.dense"
-            return [_get_graph_pattern_cutlass_code(attr=attr), 1]
-        elif match_results[0].pattern in BATCH_DENSE_LIST:
-            # batch_dense
-            attr["op_type"] = "cutlass.batch_matmul"
-            return [_get_graph_pattern_cutlass_code(attr=attr), 1]
-    return ["", 0]
+    return cutlass_codegen_with_match_results
 
 
 def _get_graph_pattern_cutlass_code(attr):
     pattern = attr["op_type"]
+    gemm_profiler = attr["gemm_profiler"]
+    conv2d_profiler = attr["conv2d_profiler"]
     if pattern.startswith("cutlass.dense"):
         # initialize arg list for codegen function
         m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type = (
@@ -244,7 +264,7 @@ def _get_graph_pattern_cutlass_code(attr):
             attr["op_type"],
         )
         return cutlass_codegen_gemm(
-            m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type
+            m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type, gemm_profiler
         )
     elif pattern.startswith("cutlass.batch_matmul"):
         m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type = (
@@ -260,7 +280,7 @@ def _get_graph_pattern_cutlass_code(attr):
             attr["op_type"],
         )
         return cutlass_codegen_batch_gemm(
-            m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type
+            m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type, gemm_profiler
         )
     elif pattern.startswith("cutlass.conv2d"):
         d, w, padding, strides, dilation, out_dtype, data_dtype, weight_dtype, op_type = (
@@ -275,7 +295,16 @@ def _get_graph_pattern_cutlass_code(attr):
             attr["op_type"],
         )
         return cutlass_codegen_conv2d(
-            d, w, padding, strides, dilation, out_dtype, data_dtype, weight_dtype, op_type
+            d,
+            w,
+            padding,
+            strides,
+            dilation,
+            out_dtype,
+            data_dtype,
+            weight_dtype,
+            op_type,
+            conv2d_profiler,
         )
     else:
         raise ValueError("op not supported")
@@ -332,12 +361,11 @@ def _attr_to_list(attr, arg_names):
 
 
 def cutlass_codegen_gemm(
-    m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type, sm=80, bin_dir="./bin"
+    m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type, gemm_profiler
 ):
     """cutlass codegen for gemm"""
-    cutlass_profiler = CutlassGemmProfiler(sm, _get_cutlass_path(), bin_dir)
     op_name, cutlass_op_def = select_gemm_kernel(
-        cutlass_profiler,
+        gemm_profiler,
         op_type,
         m,
         k,
@@ -437,12 +465,11 @@ def cutlass_codegen_gemm(
 
 
 def cutlass_codegen_batch_gemm(
-    m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type, sm=80, bin_dir="./bin"
+    m, n, k, typea, typeb, typec, layouta, layoutb, layoutc, op_type, gemm_profiler
 ):
     """cutlass codegen for batch gemm"""
-    cutlass_profiler = CutlassGemmProfiler(sm, _get_cutlass_path(), bin_dir)
     op_name, cutlass_op_def = select_gemm_kernel(
-        cutlass_profiler,
+        gemm_profiler,
         op_type,
         m,
         k,
@@ -564,14 +591,12 @@ def cutlass_codegen_conv2d(
     data_dtype,
     weight_dtype,
     op_type,
-    sm=80,
-    bin_dir="./bin",
+    conv2d_profiler,
 ):
     """cutlass codegen for conv2d"""
-    cutlass_profiler = CutlassConv2DProfiler(sm, _get_cutlass_path(), bin_dir)
     # cutlass backend only supports nhwc for now
     res = handle_conv2d(
-        cutlass_profiler=cutlass_profiler,
+        cutlass_profiler=conv2d_profiler,
         op_type=op_type,
         d_shape=d,
         w_shape=w,
@@ -585,7 +610,7 @@ def cutlass_codegen_conv2d(
         split_k_slices=[1],
         profile_all_alignments=True,
         find_first_valid=False,
-        use_multiprocessing=False,
+        use_multiprocessing=True,
     )
     cutlass_op_def = res["cutlass_op_def"]
     op_name = res["cutlass_op_name"]

@@ -368,8 +368,10 @@ class ProfilerEngine:
     def compile_all(self, ops, use_multiprocessing=False):
         """Compile all profiler executables."""
         if use_multiprocessing:
+            print("Using multiprocessing to compile {} kernels".format(len(ops)))
             pool = multiprocessing.Pool(multiprocessing.cpu_count())
             pool.map(self._compile, ops)
+            print("Done compiling {} kernels".format(len(ops)))
         else:
             for op in ops:
                 self._compile(op)

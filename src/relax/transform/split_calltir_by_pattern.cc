@@ -713,8 +713,11 @@ class SplitMutator : public ExprMutator {
       if (!split_funcs.second.defined()) {
         // no need to split, the function itself a library kernel
         // emit the call to the library kernel
+        tvm::BaseFunc lib_func = CodegenWithLibrary(split_funcs.first.get(), gv->name_hint);
+        if (lib_func->IsInstance<tir::PrimFuncNode>()) return GetRef<Call>(op);
+        ICHECK(lib_func->IsInstance<ExternFuncNode>());
         ObjectPtr<CallNode> new_call = make_object<CallNode>(*call.operator->());
-        builder_->UpdateFunction(gv, CodegenWithLibrary(split_funcs.first.get(), gv->name_hint));
+        new_call->args = {lib_func, call->args[1]};
         return Call(new_call);
       }
       tir::PrimFunc func1 = tir::RenewDefs(split_funcs.first);
@@ -726,11 +729,12 @@ class SplitMutator : public ExprMutator {
         args1.push_back(GetCallTIRArgs(call->args[1])[p]);
       }
       // replace the function in the module with the library kernel
-      GlobalVar gv1 = builder_->AddFunction(func1, "library_primfunc");
-      builder_->UpdateFunction(gv1, CodegenWithLibrary(func1.get(), gv1->name_hint));
+      tvm::BaseFunc lib_func = CodegenWithLibrary(func1.get(), gv->name_hint);
+      if (lib_func->IsInstance<tir::PrimFuncNode>()) return GetRef<Call>(op);
+      ICHECK(lib_func->IsInstance<ExternFuncNode>());
       tir::Buffer intermediate_buffer = func1->buffer_map.at(func1->params.back());
       DataType dtype = intermediate_buffer->dtype;
-      Call call1(call_tir_op_, {gv1, Tuple(args1)}, call->attrs,
+      Call call1(call_tir_op_, {lib_func, Tuple(args1)}, call->attrs,
                  {TensorStructInfo(ShapeExpr(intermediate_buffer->shape), dtype)});
       Var call_var1 = builder_->Emit(call1);
       // emit the second call to the rest of the function
