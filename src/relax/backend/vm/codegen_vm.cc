@@ -88,6 +88,10 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
   size_t NewRegister() { return registers_num_++; }
 
   void CompileCSource(const ExternFuncNode* func) {
+    if (extern_funcs_.find(func->global_symbol) != extern_funcs_.end()) {
+      return;
+    }
+    extern_funcs_.insert(func->global_symbol);
     static const constexpr char* kCSource = "c_source";
     static const constexpr char* kCSourceFmt = "c_source_fmt";
     if (Optional<String> opt_code = func->attrs.GetAttr<String>(kCSource)) {
@@ -334,6 +338,7 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
 
   Instruction::Arg VisitExpr_(const ExternFuncNode* op) final {
     builder_->DeclareFunction(op->global_symbol, VMFuncInfo::FuncKind::kPackedFunc);
+    CompileCSource(op);
     return builder_->GetFunction(op->global_symbol);
   }
 
@@ -439,6 +444,8 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
   std::unordered_map<Var, Instruction::Arg, ObjectPtrHash, ObjectPtrEqual> var_arg_map_;
   /*! \brief the context module. */
   IRModule ctx_mod_;
+  /*! \brief extern func codegen set. */
+  std::unordered_set<String, ObjectPtrHash, ObjectPtrEqual> extern_funcs_;
   /*! \brief Cache ops that need to be frequently used later to reduce lookup overhead. */
   const Op& alloc_storage_op_ = Op::Get("relax.vm.alloc_storage");
   const Op& alloc_tensor_op_ = Op::Get("relax.vm.alloc_tensor");
