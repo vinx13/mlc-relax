@@ -65,7 +65,7 @@ NType NTypeFrom(const StructInfo& sinfo, DataType dtype = DataType::Void());
 // Construct a NType from an Expr
 NType NTypeFrom(const Expr& expr, DataType dtype = DataType::Void());
 
-// Merge two messages, we keep the lower precision type for each leaf tensor
+// Merge two messages, we keep the higher precision type for each leaf tensor
 NType NTypeMerge(const NType& a, const NType& b);
 
 // The map that notes the NType message of each var

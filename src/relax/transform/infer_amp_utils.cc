@@ -42,7 +42,7 @@ NType NTypeMerge(const NType& a, const NType& b) {
     DataType b = DataType(String2DLDataType(b_str));
     ICHECK_EQ(a.code(), b.code());
     ICHECK_EQ(a.lanes(), b.lanes());
-    return a.bits() < b.bits() ? a_str : b_str;
+    return a.bits() > b.bits() ? a_str : b_str;
   };
   return CombineNestedMsg<String>(a, b, fcombine);
 }
