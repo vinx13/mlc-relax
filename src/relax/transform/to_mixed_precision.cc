@@ -244,11 +244,7 @@ class DTypeDecisionCollector : public ExprVisitor {
     }
   }
 
-  void VisitBindingBlock_(const BindingBlockNode* block) {
-    for (auto it = block->bindings.rbegin(); it != block->bindings.rend(); it++) {
-      this->VisitBinding(*it);
-    }
-  }
+  void VisitBindingBlock_(const BindingBlockNode* block) { return; }
 
   void VisitBindingBlock_(const DataflowBlockNode* block) {
     for (auto it = block->bindings.rbegin(); it != block->bindings.rend(); it++) {
@@ -339,27 +335,24 @@ class ToMixedPrecisionRewriter : public ExprMutator {
     return false;
   }
 
-  void RealizeVarDef(const Var& var) {
-    // store the tensors that are fp16 only to fp16
-    auto it = only_fp16_map_->find(var);
-    if (it == only_fp16_map_->end()) return;
+  void CastIfFp16Only(const Var& var) {
+    ICHECK(builder_->CurrentBlockIsDataFlow());
     // Get the current remapped var
     Var cur_var = GetRemapped(var);
+    // Store the tensors that are fp16 only to fp16
+    auto it = only_fp16_map_->find(var);
+    if (it == only_fp16_map_->end()) return;
     // Get the to dtype, cast to fp16 if the var is fp16 only, otherwise do nothing
-    NType from = NTypeFrom(cur_var);
     auto fcombine = [](const String& from, const String& required) -> String {
       return required == "float16" ? required : from;
     };
+    NType from = NTypeFrom(cur_var);
     NType to = CombineNestedMsg<String>(from, it->second, fcombine);
     Expr rewrite = RewriteExpr(cur_var, to);
     // If cur_var is not rewritten, we don't need to emit a new var
     if (!rewrite.same_as(cur_var)) {
       // Emit a new var, and update the var remap
-      if (!var->IsInstance<DataflowVarNode>() && builder_->CurrentBlockIsDataFlow()) {
-        var_remap_[var->vid] = builder_->EmitOutput(rewrite);
-      } else {
-        var_remap_[var->vid] = builder_->Emit(rewrite);
-      }
+      var_remap_[var->vid] = builder_->Emit(rewrite);
     }
   }
 
@@ -372,55 +365,38 @@ class ToMixedPrecisionRewriter : public ExprMutator {
     return var;
   }
 
-  Expr VisitExpr_(const VarNode* op) final { return VisitVar_(GetRef<Var>(op)); }
-
-  Expr VisitExpr_(const DataflowVarNode* op) final { return VisitVar_(GetRef<Var>(op)); }
-
-  Expr VisitExpr_(const FunctionNode* op) final {
-    tvm::Array<Var> params;
-    bool all_params_unchanged = true;
-    for (Var param : op->params) {
-      Var new_param = this->VisitVarDef(param);
-      params.push_back(new_param);
-      all_params_unchanged &= param.same_as(new_param);
+  Expr VisitExpr_(const VarNode* op) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      return ExprMutator::VisitExpr_(op);
     }
+    return VisitVar_(GetRef<Var>(op));
+  }
 
-    // Override here to realize the params, and build a binding block
-    builder_->BeginDataflowBlock();
-    for (const auto& param : op->params) {
-      RealizeVarDef(param);
+  Expr VisitExpr_(const DataflowVarNode* op) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      return ExprMutator::VisitExpr_(op);
     }
-    BindingBlock bb = builder_->EndBlock();
+    return VisitVar_(GetRef<Var>(op));
+  }
 
-    Expr body = this->VisitWithNewScope(op->body, params);
-    if (!bb->bindings.empty()) {
-      if (const auto* seq = body.as<SeqExprNode>()) {
-        Array<BindingBlock> new_blocks = seq->blocks;
-        new_blocks.insert(new_blocks.begin(), bb);
-        body = SeqExpr(new_blocks, seq->body);
-      } else {
-        body = SeqExpr({bb}, body);
-      }
-      body = builder_->Normalize(body);
-    }
-
-    // FuncStructInfo does not depend on Expr
-    if (all_params_unchanged && body.same_as(op->body)) {
-      return GetRef<Expr>(op);
-    } else {
-      return Function(params, body, op->ret_struct_info, op->attrs);
-    }
-    return ExprMutator::VisitExpr_(op);
+  void VisitBinding(const Binding& binding) {
+    ExprMutator::VisitBinding(binding);
+    if (!builder_->CurrentBlockIsDataFlow()) return;
+    CastIfFp16Only(binding->var);
   }
 
   void VisitBinding_(const VarBindingNode* binding, const CallNode* call_node) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      ExprMutator::VisitBinding_(binding, call_node);
+      return;
+    }
     auto policy = GetMixedPrecisionInfo(call_node);
     if (policy == -1) {
       // not an op call
       ExprMutator::VisitBinding_(binding, call_node);
       return;
     }
-    // Call(op)
+    // var = Call(op)
     const auto* op_node = call_node->op.as<OpNode>();
     ICHECK(op_node != nullptr);
     Op op = GetRef<Op>(op_node);
@@ -451,30 +427,79 @@ class ToMixedPrecisionRewriter : public ExprMutator {
     }
     new_call->args = std::move(RewriteArgs(new_call->args, to));
     new_call->struct_info_ = NullOpt;
-    if (policy == kAlways) {
-      // Cast the output to fp16
-      Expr cur_call = builder_->Normalize(Call(new_call));
-      Expr cast_call = RewriteExpr(cur_call, NTypeFrom(cur_call, fp16_));
-      ReEmitBinding(binding, builder_->Normalize(cast_call));
-    } else {
-      ReEmitBinding(binding, builder_->Normalize(Call(new_call)));
+    Expr new_value = builder_->Normalize(Call(new_call));
+    if (policy == kAlways && binding->var->IsInstance<DataflowVarNode>()) {
+      // kAlways: store the tensors to fp16
+      // But global vars will be stored to the original dtype anyway (see below)
+      new_value = RewriteExpr(new_value, NTypeFrom(new_value, fp16_));
     }
+    if (!binding->var->IsInstance<DataflowVarNode>()) {
+      // Global var: store the tensors to the original dtype
+      NType to = NTypeFrom(binding->var);
+      new_value = RewriteExpr(new_value, to);
+    }
+    ReEmitBinding(binding, builder_->Normalize(new_value));
   }
 
   void VisitBinding_(const VarBindingNode* binding, const TupleNode* tuple_node) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      ExprMutator::VisitBinding_(binding, tuple_node);
+      return;
+    }
     ObjectPtr<TupleNode> new_tuple = make_object<TupleNode>(*tuple_node);
     new_tuple->fields = std::move(RemapArgs(tuple_node->fields));
     new_tuple->struct_info_ = NullOpt;
-    ReEmitBinding(binding, builder_->Normalize(Tuple(new_tuple)));
+    Expr new_value = Tuple(new_tuple);
+    if (!binding->var->IsInstance<DataflowVarNode>()) {
+      // Global var: store the tensors to the original dtype
+      NType to = NTypeFrom(binding->var);
+      new_value = RewriteExpr(new_value, to);
+    }
+    ReEmitBinding(binding, builder_->Normalize(new_value));
   }
 
   void VisitBinding_(const VarBindingNode* binding,
                      const TupleGetItemNode* tuple_get_item_node) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      // We don't need to rewrite the tuple_get_item in dataflow block
+      ExprMutator::VisitBinding_(binding, tuple_get_item_node);
+      return;
+    }
     ObjectPtr<TupleGetItemNode> new_tuple_get_item =
         make_object<TupleGetItemNode>(*tuple_get_item_node);
     new_tuple_get_item->tuple = RemapArgs({tuple_get_item_node->tuple})[0];
     new_tuple_get_item->struct_info_ = NullOpt;
-    ReEmitBinding(binding, builder_->Normalize(TupleGetItem(new_tuple_get_item)));
+    Expr new_value = TupleGetItem(new_tuple_get_item);
+    if (!binding->var->IsInstance<DataflowVarNode>()) {
+      // Global var: store the tensors to the original dtype
+      NType to = NTypeFrom(binding->var);
+      new_value = RewriteExpr(new_value, to);
+    }
+    ReEmitBinding(binding, builder_->Normalize(new_value));
+  }
+
+  BindingBlock VisitBindingBlock_(const DataflowBlockNode* block) {
+    builder_->BeginDataflowBlock();
+    // prepare local versions of params here, if they are fp16 expected only
+    for (auto param : params_) {
+      CastIfFp16Only(param);
+    }
+    for (auto binding : block->bindings) {
+      this->VisitBinding(binding);
+    }
+    for (auto param : params_) {
+      // remove the local version of params
+      auto it = var_remap_.find(param->vid);
+      if (it != var_remap_.end()) {
+        var_remap_.erase(it);
+      }
+    }
+    return builder_->EndBlock();
+  }
+
+  Expr VisitExpr_(const FunctionNode* op) final {
+    params_ = op->params;
+    return ExprMutator::VisitExpr_(op);
   }
 
   const VarDTypeMap* only_fp16_map_;
@@ -482,6 +507,7 @@ class ToMixedPrecisionRewriter : public ExprMutator {
   DataType fp16_ = DataType(DataType::TypeCode::kFloat, 16, 1);
   DataType fp32_ = DataType(DataType::TypeCode::kFloat, 32, 1);
   DataType output_dtype_;
+  Array<Var> params_;
 
   const Op& wrap_param_op = Op::Get("relax.wrap_param");
 };

@@ -77,6 +77,10 @@ class DeadCodeEliminator : public ExprMutator {
     }
   }
 
+  BindingBlock VisitBindingBlock_(const BindingBlockNode* block) final {
+    return GetRef<BindingBlock>(block);
+  }
+
   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> used_vars_;
 };
 

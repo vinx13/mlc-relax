@@ -46,11 +46,11 @@ def test_conv2d():
             x: R.Tensor((2, 3, 28, 28), dtype="float32"), w: R.Tensor((4, 3, 3, 3), dtype="float32")
         ) -> R.Tensor((2, 4, 26, 26), dtype="float32"):
             with R.dataflow():
-                gv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
-                gv1: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
-                lv: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
-                    gv,
-                    gv1,
+                lv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
+                lv1: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
+                gv: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
+                    lv,
+                    lv1,
                     strides=[1, 1],
                     padding=[0, 0, 0, 0],
                     dilation=[1, 1],
@@ -60,10 +60,8 @@ def test_conv2d():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                gv_1: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv, dtype="float16")
-                R.output(gv, gv1, gv_1)
-            gv2: R.Tensor((2, 4, 26, 26), dtype="float32") = R.astype(gv_1, dtype="float32")
-            return gv2
+                R.output(gv)
+            return gv
 
     _assert_test(Input, Expected)
 
@@ -76,10 +74,10 @@ def test_conv2d_relu():
             x: R.Tensor((2, 3, 28, 28), "float32"), w: R.Tensor((4, 3, 3, 3), "float32")
         ) -> R.Tensor(None, "float32", ndim=4):
             with R.dataflow():
-                gv: R.Tensor((2, 4, 26, 26), "float32") = R.nn.conv2d(x, w, out_dtype="float32")
-                gv2: R.Tensor((2, 4, 26, 26), "float32") = R.nn.relu(gv)
-                R.output(gv2)
-            return gv2
+                lv: R.Tensor((2, 4, 26, 26), "float32") = R.nn.conv2d(x, w, out_dtype="float32")
+                gv: R.Tensor((2, 4, 26, 26), "float32") = R.nn.relu(lv)
+                R.output(gv)
+            return gv
 
     @I.ir_module
     class Expected:
@@ -88,11 +86,11 @@ def test_conv2d_relu():
             x: R.Tensor((2, 3, 28, 28), dtype="float32"), w: R.Tensor((4, 3, 3, 3), dtype="float32")
         ) -> R.Tensor((2, 4, 26, 26), dtype="float32"):
             with R.dataflow():
-                gv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
-                gv1: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
-                lv: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
-                    gv,
-                    gv1,
+                lv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
+                lv1: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
+                lv2: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
+                    lv,
+                    lv1,
                     strides=[1, 1],
                     padding=[0, 0, 0, 0],
                     dilation=[1, 1],
@@ -102,11 +100,11 @@ def test_conv2d_relu():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                gv_1: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv, dtype="float16")
-                gv2: R.Tensor((2, 4, 26, 26), dtype="float16") = R.nn.relu(gv_1)
-                R.output(gv, gv1, gv2)
-            gv2_1: R.Tensor((2, 4, 26, 26), dtype="float32") = R.astype(gv2, dtype="float32")
-            return gv2_1
+                lv_1: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv2, dtype="float16")
+                lv3: R.Tensor((2, 4, 26, 26), dtype="float16") = R.nn.relu(lv_1)
+                gv: R.Tensor((2, 4, 26, 26), dtype="float32") = R.astype(lv3, dtype="float32")
+                R.output(gv)
+            return gv
 
     _assert_test(Input, Expected)
 
@@ -132,12 +130,12 @@ def test_relu_conv2d_relu():
             x: R.Tensor((2, 3, 28, 28), dtype="float32"), w: R.Tensor((4, 3, 3, 3), dtype="float32")
         ) -> R.Tensor((2, 4, 26, 26), dtype="float32"):
             with R.dataflow():
-                gv: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
+                lv: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
                 x0: R.Tensor((2, 3, 28, 28), dtype="float32") = R.nn.relu(x)
-                lv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x0, dtype="float16")
-                lv1: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
+                lv1: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x0, dtype="float16")
+                lv2: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
+                    lv1,
                     lv,
-                    gv,
                     strides=[1, 1],
                     padding=[0, 0, 0, 0],
                     dilation=[1, 1],
@@ -147,11 +145,11 @@ def test_relu_conv2d_relu():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                gv_1: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv1, dtype="float16")
-                gv2: R.Tensor((2, 4, 26, 26), dtype="float16") = R.nn.relu(gv_1)
-                R.output(gv, gv2)
-            gv1: R.Tensor((2, 4, 26, 26), dtype="float32") = R.astype(gv2, dtype="float32")
-            return gv1
+                gv: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv2, dtype="float16")
+                lv3: R.Tensor((2, 4, 26, 26), dtype="float16") = R.nn.relu(gv)
+                gv2: R.Tensor((2, 4, 26, 26), dtype="float32") = R.astype(lv3, dtype="float32")
+                R.output(gv2)
+            return gv2
 
     _assert_test(Input, Expected)
 
@@ -181,12 +179,12 @@ def test_conv2d_relu_conv2d():
             w2: R.Tensor((4, 4, 3, 3), dtype="float32"),
         ) -> R.Tensor((2, 4, 24, 24), dtype="float32"):
             with R.dataflow():
-                gv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
-                gv1: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
-                gv2: R.Tensor((4, 4, 3, 3), dtype="float16") = R.astype(w2, dtype="float16")
-                lv: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
-                    gv,
-                    gv1,
+                lv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
+                lv1: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
+                lv2: R.Tensor((4, 4, 3, 3), dtype="float16") = R.astype(w2, dtype="float16")
+                lv3: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
+                    lv,
+                    lv1,
                     strides=[1, 1],
                     padding=[0, 0, 0, 0],
                     dilation=[1, 1],
@@ -196,11 +194,11 @@ def test_conv2d_relu_conv2d():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                gv_1: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv, dtype="float16")
-                gv2_1: R.Tensor((2, 4, 26, 26), dtype="float16") = R.nn.relu(gv_1)
-                lv1: R.Tensor((2, 4, 24, 24), dtype="float32") = R.nn.conv2d(
-                    gv2_1,
+                gv: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv3, dtype="float16")
+                gv2: R.Tensor((2, 4, 26, 26), dtype="float16") = R.nn.relu(gv)
+                gv3: R.Tensor((2, 4, 24, 24), dtype="float32") = R.nn.conv2d(
                     gv2,
+                    lv2,
                     strides=[1, 1],
                     padding=[0, 0, 0, 0],
                     dilation=[1, 1],
@@ -210,10 +208,8 @@ def test_conv2d_relu_conv2d():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                gv3: R.Tensor((2, 4, 24, 24), dtype="float16") = R.astype(lv1, dtype="float16")
-                R.output(gv, gv1, gv2, gv3)
-            gv3_1: R.Tensor((2, 4, 24, 24), dtype="float32") = R.astype(gv3, dtype="float32")
-            return gv3_1
+                R.output(gv3)
+            return gv3
 
     _assert_test(Input, Expected)
 
@@ -243,14 +239,14 @@ def test_gemm_add_silu():
             w2: R.Tensor((2, 1280), dtype="float32"),
         ) -> R.Tensor((2, 1280), dtype="float32"):
             with R.dataflow():
-                gv: R.Tensor((2, 320), dtype="float16") = R.astype(x, dtype="float16")
-                gv1: R.Tensor((320, 1280), dtype="float16") = R.astype(w1, dtype="float16")
-                lv: R.Tensor((2, 1280), dtype="float32") = R.matmul(gv, gv1, out_dtype="float32")
-                gv0: R.Tensor((2, 1280), dtype="float16") = R.astype(lv, dtype="float16")
-                lv1: R.Tensor((2, 1280), dtype="float32") = R.astype(gv0, dtype="float32")
-                gv1_1: R.Tensor((2, 1280), dtype="float32") = R.add(lv1, w2)
-                gv2: R.Tensor((2, 1280), dtype="float32") = R.nn.silu(gv1_1)
-                R.output(gv, gv1, gv2)
+                lv: R.Tensor((2, 320), dtype="float16") = R.astype(x, dtype="float16")
+                lv1: R.Tensor((320, 1280), dtype="float16") = R.astype(w1, dtype="float16")
+                lv2: R.Tensor((2, 1280), dtype="float32") = R.matmul(lv, lv1, out_dtype="float32")
+                gv0: R.Tensor((2, 1280), dtype="float16") = R.astype(lv2, dtype="float16")
+                lv3: R.Tensor((2, 1280), dtype="float32") = R.astype(gv0, dtype="float32")
+                gv1: R.Tensor((2, 1280), dtype="float32") = R.add(lv3, w2)
+                gv2: R.Tensor((2, 1280), dtype="float32") = R.nn.silu(gv1)
+                R.output(gv2)
             return gv2
 
     _assert_test(Input, Expected)
@@ -285,12 +281,12 @@ def test_tuple():
             w_2: R.Tensor((4, 4, 3, 3), dtype="float32"),
         ) -> R.Tensor((2, 4, 24, 24), dtype="float32"):
             with R.dataflow():
-                gv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
-                gv1: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
-                gv2: R.Tensor((4, 4, 3, 3), dtype="float16") = R.astype(w_2, dtype="float16")
-                lv: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
-                    gv,
-                    gv1,
+                lv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
+                lv1: R.Tensor((4, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
+                lv2: R.Tensor((4, 4, 3, 3), dtype="float16") = R.astype(w_2, dtype="float16")
+                lv3: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
+                    lv,
+                    lv1,
                     strides=[1, 1],
                     padding=[0, 0, 0, 0],
                     dilation=[1, 1],
@@ -300,10 +296,10 @@ def test_tuple():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                gv_1: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv, dtype="float16")
-                lv1: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
-                    gv,
-                    gv1,
+                gv: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv3, dtype="float16")
+                lv4: R.Tensor((2, 4, 26, 26), dtype="float32") = R.nn.conv2d(
+                    lv,
+                    lv1,
                     strides=[1, 1],
                     padding=[0, 0, 0, 0],
                     dilation=[1, 1],
@@ -313,26 +309,26 @@ def test_tuple():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                gv2_1: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv1, dtype="float16")
+                gv2: R.Tensor((2, 4, 26, 26), dtype="float16") = R.astype(lv4, dtype="float16")
                 gv3: R.Tuple(
                     R.Tensor((2, 4, 26, 26), dtype="float16"),
                     R.Tensor((2, 4, 26, 26), dtype="float16"),
-                ) = (gv_1, gv2_1)
+                ) = (gv, gv2)
                 gv4: R.Tuple(
                     R.Tuple(
                         R.Tensor((2, 4, 26, 26), dtype="float16"),
                         R.Tensor((2, 4, 26, 26), dtype="float16"),
                     ),
                     R.Tensor((2, 4, 26, 26), dtype="float16"),
-                ) = (gv3, gv2_1)
+                ) = (gv3, gv2)
                 gv5: R.Tuple(
                     R.Tensor((2, 4, 26, 26), dtype="float16"),
                     R.Tensor((2, 4, 26, 26), dtype="float16"),
                 ) = gv4[0]
                 gv6: R.Tensor((2, 4, 26, 26), dtype="float16") = gv5[0]
-                lv2: R.Tensor((2, 4, 24, 24), dtype="float32") = R.nn.conv2d(
+                gv7: R.Tensor((2, 4, 24, 24), dtype="float32") = R.nn.conv2d(
                     gv6,
-                    gv2,
+                    lv2,
                     strides=[1, 1],
                     padding=[0, 0, 0, 0],
                     dilation=[1, 1],
@@ -342,10 +338,8 @@ def test_tuple():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                gv7: R.Tensor((2, 4, 24, 24), dtype="float16") = R.astype(lv2, dtype="float16")
-                R.output(gv, gv1, gv2, gv7)
-            gv3_1: R.Tensor((2, 4, 24, 24), dtype="float32") = R.astype(gv7, dtype="float32")
-            return gv3_1
+                R.output(gv7)
+            return gv7
 
     _assert_test(Input, Expected)
 
@@ -374,14 +368,12 @@ def test_concat_matmul():
             w: R.Tensor((320, 1280), dtype="float32"),
         ) -> R.Tensor((2, 1280), dtype="float32"):
             with R.dataflow():
-                gv: R.Tensor((320, 1280), dtype="float16") = R.astype(w, dtype="float16")
+                lv: R.Tensor((320, 1280), dtype="float16") = R.astype(w, dtype="float16")
                 lv13: R.Tensor((2, 320), dtype="float32") = R.concat((lv10, lv12), axis=-1)
-                lv: R.Tensor((2, 320), dtype="float16") = R.astype(lv13, dtype="float16")
-                lv1: R.Tensor((2, 1280), dtype="float32") = R.matmul(lv, gv, out_dtype="float32")
-                lv14: R.Tensor((2, 1280), dtype="float16") = R.astype(lv1, dtype="float16")
-                R.output(gv, lv14)
-            gv1: R.Tensor((2, 1280), dtype="float32") = R.astype(lv14, dtype="float32")
-            return gv1
+                lv1: R.Tensor((2, 320), dtype="float16") = R.astype(lv13, dtype="float16")
+                lv14: R.Tensor((2, 1280), dtype="float32") = R.matmul(lv1, lv, out_dtype="float32")
+                R.output(lv14)
+            return lv14
 
     _assert_test(Input, Expected)
 
@@ -407,11 +399,11 @@ def test_conv2d_softmax():
             x: R.Tensor((2, 3, 28, 28), dtype="float32"), w: R.Tensor((3, 3, 3, 3), dtype="float32")
         ) -> R.Tensor((2, 3, 26, 26), dtype="float32"):
             with R.dataflow():
-                gv: R.Tensor((3, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
-                lv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
-                lv1: R.Tensor((2, 3, 28, 28), dtype="float32") = R.nn.conv2d(
+                lv: R.Tensor((3, 3, 3, 3), dtype="float16") = R.astype(w, dtype="float16")
+                lv1: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(x, dtype="float16")
+                lv2: R.Tensor((2, 3, 28, 28), dtype="float32") = R.nn.conv2d(
+                    lv1,
                     lv,
-                    gv,
                     strides=[1, 1],
                     padding=[1, 1, 1, 1],
                     dilation=[1, 1],
@@ -421,11 +413,11 @@ def test_conv2d_softmax():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                gv_1: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(lv1, dtype="float16")
+                gv: R.Tensor((2, 3, 28, 28), dtype="float16") = R.astype(lv2, dtype="float16")
                 gv1: R.Tensor((2, 3, 28, 28), dtype="float32") = R.nn.softmax(x, axis=1)
-                lv2: R.Tensor((2, 3, 28, 28), dtype="float32") = R.astype(gv_1, dtype="float32")
-                gv2: R.Tensor((2, 3, 28, 28), dtype="float32") = R.add(lv2, gv1)
-                R.output(gv, gv2)
+                lv3: R.Tensor((2, 3, 28, 28), dtype="float32") = R.astype(gv, dtype="float32")
+                gv2: R.Tensor((2, 3, 28, 28), dtype="float32") = R.add(lv3, gv1)
+                R.output(gv2)
             return gv2
 
     _assert_test(Input, Expected)
@@ -492,13 +484,13 @@ def test_conv2d_bias_conv2d():
         ) -> R.Tensor((1, 512, 64, 64), dtype="float32"):
             # block 0
             with R.dataflow():
-                gv: R.Tensor((1, 4, 64, 64), dtype="float16") = R.astype(z, dtype="float16")
-                lv: R.Tensor((512, 4, 3, 3), dtype="float16") = w0
+                lv: R.Tensor((1, 4, 64, 64), dtype="float16") = R.astype(z, dtype="float16")
+                lv_1: R.Tensor((512, 4, 3, 3), dtype="float16") = w0
                 lv1: R.Tensor((512,), dtype="float16") = w1
                 lv140: R.Tensor((4, 4, 1, 1), dtype="float16") = w2
                 lv141: R.Tensor((4,), dtype="float16") = w3
-                lv_1: R.Tensor((1, 4, 64, 64), dtype="float32") = R.nn.conv2d(
-                    gv,
+                lv1_1: R.Tensor((1, 4, 64, 64), dtype="float32") = R.nn.conv2d(
+                    lv,
                     lv140,
                     strides=[1, 1],
                     padding=[0, 0, 0, 0],
@@ -509,12 +501,12 @@ def test_conv2d_bias_conv2d():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                lv142: R.Tensor((1, 4, 64, 64), dtype="float16") = R.astype(lv_1, dtype="float16")
+                lv142: R.Tensor((1, 4, 64, 64), dtype="float16") = R.astype(lv1_1, dtype="float16")
                 lv143: R.Tensor((1, 4, 1, 1), dtype="float16") = R.reshape(lv141, (1, 4, 1, 1))
                 lv144: R.Tensor((1, 4, 64, 64), dtype="float16") = R.add(lv142, lv143)
-                lv1_1: R.Tensor((1, 512, 64, 64), dtype="float32") = R.nn.conv2d(
+                lv2: R.Tensor((1, 512, 64, 64), dtype="float32") = R.nn.conv2d(
                     lv144,
-                    lv,
+                    lv_1,
                     strides=[1, 1],
                     padding=[1, 1, 1, 1],
                     dilation=[1, 1],
@@ -524,14 +516,12 @@ def test_conv2d_bias_conv2d():
                     out_layout="NCHW",
                     out_dtype="float32",
                 )
-                lv145: R.Tensor((1, 512, 64, 64), dtype="float16") = R.astype(
-                    lv1_1, dtype="float16"
-                )
+                lv145: R.Tensor((1, 512, 64, 64), dtype="float16") = R.astype(lv2, dtype="float16")
                 lv146: R.Tensor((1, 512, 1, 1), dtype="float16") = R.reshape(lv1, (1, 512, 1, 1))
                 lv147: R.Tensor((1, 512, 64, 64), dtype="float16") = R.add(lv145, lv146)
-                gv_1: R.Tensor((1, 512, 64, 64), dtype="float32") = R.astype(lv147, dtype="float32")
-                R.output(gv, gv_1)
-            return gv_1
+                gv: R.Tensor((1, 512, 64, 64), dtype="float32") = R.astype(lv147, dtype="float32")
+                R.output(gv)
+            return gv
 
     binding = {
         "w0": np.random.uniform(size=(512, 4, 3, 3)).astype("float16"),
