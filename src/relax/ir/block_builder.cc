@@ -649,14 +649,21 @@ class Normalizer : public BlockBuilderImpl, private ExprFunctor<Expr(const Expr&
 
     TupleGetItem node = new_tuple.same_as(op->tuple) ? GetRef<TupleGetItem>(op)
                                                      : TupleGetItem(new_tuple, op->index);
+    auto opt = MatchStructInfo<TupleStructInfo>(node->tuple);
+    ICHECK(opt) << "The struct info of Tuple must be TupleStructInfo.";
+    
+    Expr res = node;
+    if (const auto* tuple = node->tuple.as<TupleNode>()) {
+        // If the tuple is a Tuple, we can directly return the field.
+        ICHECK_LT(static_cast<size_t>(node->index), tuple->fields.size());
+        res = tuple->fields[node->index];
+      }
 
-    if (!node->struct_info_.defined()) {
-      auto opt = MatchStructInfo<TupleStructInfo>(node->tuple);
-      ICHECK(opt) << "The struct info of Tuple must be TupleStructInfo.";
-      UpdateStructInfo(node, opt.value()->fields[node->index]);
+    if (!res->struct_info_.defined()) {
+      UpdateStructInfo(res, opt.value()->fields[node->index]);
     }
 
-    return node;
+    return res;
   }
 
   Binding VisitBinding(const Binding& binding) {

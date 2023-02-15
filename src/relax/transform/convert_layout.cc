@@ -125,6 +125,9 @@ class LayoutConvertMutator : public ExprMutator {
   void VisitBinding(const Binding& binding) final {
     // Emit the binding
     ExprMutator::VisitBinding(binding);
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      return;
+    }
     // The layout is default to be initial if not rewritten.
     if (IsNestedTensor(binding->var)) {
       if (var_layout_map_.find(binding->var) == var_layout_map_.end()) {
@@ -141,9 +144,19 @@ class LayoutConvertMutator : public ExprMutator {
     return ExprMutator::VisitExpr_(var.get());
   }
 
-  Expr VisitExpr_(const VarNode* op) final { return VisitVars_(GetRef<Var>(op)); }
+  Expr VisitExpr_(const VarNode* op) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      return ExprMutator::VisitExpr_(op);
+    }
+    return VisitVars_(GetRef<Var>(op));
+  }
 
-  Expr VisitExpr_(const DataflowVarNode* op) final { return VisitVars_(GetRef<Var>(op)); }
+  Expr VisitExpr_(const DataflowVarNode* op) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      return ExprMutator::VisitExpr_(op);
+    }
+    return VisitVars_(GetRef<Var>(op));
+  }
 
   bool HasUnknownDimTensor(const NLayout& nlayout) {
     bool find = false;
@@ -183,12 +196,18 @@ class LayoutConvertMutator : public ExprMutator {
   }
 
   void VisitBinding_(const VarBindingNode* binding, const CallNode* call_node) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      ExprMutator::VisitBinding_(binding, call_node);
+      return;
+    }
     Optional<InferLayoutOutput> res =
         GetInferLayoutInfo(call_node, desired_layouts_, var_layout_map_);
     ObjectPtr<CallNode> new_call = make_object<CallNode>(*call_node);
     new_call->struct_info_ = NullOpt;
-    if (!res.defined()) {
+    if (!res.defined() ||
+        (!IsNestedTensor(binding->var) && !binding->var->IsInstance<DataflowVarNode>())) {
       // Default policy: use the initial layout.
+      // When we don't have the infer layout info, or it's a non-tensor global var binding.
       std::vector<NLayout> input_layout;
       for (const auto& arg : call_node->args) {
         if (IsNestedTensor(arg)) {
@@ -209,36 +228,65 @@ class LayoutConvertMutator : public ExprMutator {
       Array<Expr> new_args = RewriteArgs(call_node->args, res.value()->input_layouts);
       new_call->args = std::move(new_args);
       new_call->attrs = std::move(res.value()->new_attrs);
-      ReEmitBinding(binding, builder_->Normalize(Call(new_call)));
-      // update the layout map
-      if (IsNestedTensor(binding->var)) {
-        var_layout_map_[binding->var] = res.value()->output_layouts[0];
+      Expr cur_call = builder_->Normalize(Call(new_call));
+      if (binding->var->IsInstance<DataflowVarNode>()) {
+        // Dataflow var, we emit the rewritten call.
+        ReEmitBinding(binding, cur_call);
+        // update the layout map
+        if (IsNestedTensor(binding->var)) {
+          var_layout_map_[binding->var] = res.value()->output_layouts[0];
+        }
+      } else {
+        // Global var (tensor), we rewrite it to initial layout
+        ICHECK(IsNestedTensor(binding->var));
+        if (!NLayoutEqual()(res.value()->output_layouts[0], InitialNLayout(binding->var))) {
+          Var new_var = builder_->Emit(cur_call);
+          var_layout_map_[new_var] = res.value()->output_layouts[0];
+          cur_call = builder_->Normalize(RewriteExpr(new_var, InitialNLayout(binding->var)));
+        }
+        ReEmitBinding(binding, cur_call);
+        // update the layout map
+        var_layout_map_[binding->var] = InitialNLayout(binding->var);
       }
     }
   }
 
   void VisitBinding_(const VarBindingNode* binding, const TupleNode* val) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      ExprMutator::VisitBinding_(binding, val);
+      return;
+    }
     std::vector<NLayout> input_layout;
     for (const auto& field : val->fields) {
       if (IsNestedTensor(field)) {
-        // Use the current realized layout to group the tuple;
-        input_layout.push_back(GetNLayout(var_layout_map_, field));
+        if (binding->var->IsInstance<DataflowVarNode>()) {
+          // Df var: Use the current realized layout to group the tuple;
+          input_layout.push_back(GetNLayout(var_layout_map_, field));
+        } else {
+          // Global var: Use the initial layout to group the tuple;
+          input_layout.push_back(InitialNLayout(field));
+        }
       } else {
         input_layout.push_back(LayoutDecision::InitUnknownDim());
       }
     }
     Array<Expr> new_fields = RewriteArgs(val->fields, std::move(input_layout));
-    ReEmitBinding(binding, builder_->Normalize(Tuple(new_fields)));
-    // update the layout map
     if (IsNestedTensor(binding->var)) {
+      ReEmitBinding(binding, builder_->Normalize(Tuple(new_fields)));
       var_layout_map_[binding->var] = input_layout;
     }
   }
 
   void VisitBinding_(const VarBindingNode* binding, const TupleGetItemNode* val) final {
+    if (!builder_->CurrentBlockIsDataFlow()) {
+      ExprMutator::VisitBinding_(binding, val);
+      return;
+    }
     if (IsNestedTensor(val->tuple)) {
       // Use the current realized layout to retrieve the field;
-      NLayout input_layout = GetNLayout(var_layout_map_, val->tuple);
+      NLayout input_layout = binding->var->IsInstance<DataflowVarNode>()
+                                 ? GetNLayout(var_layout_map_, val->tuple)
+                                 : InitialNLayout(val->tuple);
       ReEmitBinding(binding, builder_->Normalize(
                                  TupleGetItem(RewriteExpr(val->tuple, input_layout), val->index)));
       // update the layout map
