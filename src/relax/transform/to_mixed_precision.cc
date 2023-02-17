@@ -449,7 +449,7 @@ class ToMixedPrecisionRewriter : public ExprMutator {
     ObjectPtr<TupleNode> new_tuple = make_object<TupleNode>(*tuple_node);
     new_tuple->fields = std::move(RemapArgs(tuple_node->fields));
     new_tuple->struct_info_ = NullOpt;
-    Expr new_value = Tuple(new_tuple);
+    Expr new_value = builder_->Normalize(Tuple(new_tuple));
     if (!binding->var->IsInstance<DataflowVarNode>()) {
       // Global var: store the tensors to the original dtype
       NType to = NTypeFrom(binding->var);

@@ -285,7 +285,7 @@ class CutlassConv2DProfiler:
             use_3xtf32,
             profile_all_alignments,
             # Use fp32 accumulation for wgrad to align with cuDNN
-            accumlator_dtype="float32" if conv_kind == ConvKind.Wgrad else out_dtype,
+            accumlator_dtype="float32",  #  if conv_kind == ConvKind.Wgrad else out_dtype,
         )
 
         if not find_first_valid:

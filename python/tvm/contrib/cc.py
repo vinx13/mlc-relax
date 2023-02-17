@@ -242,6 +242,7 @@ def _linux_compile(output, objects, options, compile_cmd, compile_shared=False):
         cmd += ["-Xcompiler=-fPIC"]
         cmd += ["-Xcompiler=-fno-strict-aliasing"]
     cmd += ["-o", output]
+    cmd += ["-t 24"]
     if isinstance(objects, str):
         cmd += [objects]
     else:
