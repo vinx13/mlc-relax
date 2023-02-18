@@ -279,11 +279,11 @@ InferLayoutOutput InferLayoutLayerNorm(const Call& call,
 
   LayoutDecision layout = GetLayoutDecision(var_layout_map, call->args[0]);
   ObjectPtr<LayerNormAttrs> new_attrs = make_object<LayerNormAttrs>(*attrs);
-  std::vector<Integer> new_axis;
+  std::vector<Integer> new_axes;
   for (const auto& axis : attrs->axes) {
-    new_axis.push_back(FindAxis(layout->layout, axis->value));
+    new_axes.push_back(FindAxis(layout->layout, axis->value));
   }
-  new_attrs->axes = std::move(new_axis);
+  new_attrs->axes = std::move(new_axes);
   return InferLayoutOutput({layout, initial_layouts[1], initial_layouts[2]}, {layout},
                            Attrs(new_attrs));
 }
@@ -296,6 +296,91 @@ TVM_REGISTER_OP("relax.nn.layer_norm")
     .add_argument("beta", "Tensor", "The beta offset factor.")
     .set_attr<FInferStructInfo>("FInferStructInfo", InferStructInfoLayerNorm)
     .set_attr<FRelaxInferLayout>("FRelaxInferLayout", InferLayoutLayerNorm);
+
+/* relax.nn.group_norm */
+TVM_REGISTER_NODE_TYPE(GroupNormAttrs);
+
+Expr group_norm(Expr data, Expr gamma, Expr beta, int num_groups, int channel_axis,
+                Array<Integer> axes, double epsilon, bool center, bool scale) {
+  ObjectPtr<GroupNormAttrs> attrs = make_object<GroupNormAttrs>();
+  attrs->num_groups = num_groups;
+  attrs->channel_axis = channel_axis;
+  attrs->axes = std::move(axes);
+  attrs->epsilon = epsilon;
+  attrs->center = center;
+  attrs->scale = scale;
+
+  static const Op& op = Op::Get("relax.nn.group_norm");
+  return Call(op, {std::move(data), std::move(gamma), std::move(beta)}, Attrs{attrs}, {});
+}
+
+TVM_REGISTER_GLOBAL("relax.op.nn.group_norm").set_body_typed(group_norm);
+
+StructInfo InferStructInfoGroupNorm(const Call& call, const BlockBuilder& ctx) {
+  Array<TensorStructInfo> input_sinfo = GetInputTensorStructInfo(call, ctx);
+  const auto* attrs = call->attrs.as<GroupNormAttrs>();
+
+  std::vector<TensorStructInfo> grouped_input_sinfo(input_sinfo.begin(), input_sinfo.end());
+
+  TensorStructInfo data_sinfo = input_sinfo[0];
+  if (!data_sinfo->IsUnknownNdim()) {
+    int channel_axis = NormalizeAxis(call, ctx, data_sinfo->ndim, attrs->channel_axis);
+    std::vector<int> axes = NormalizeAxes(call, ctx, data_sinfo->ndim, attrs->axes);
+    // channel_axis must be in axes.
+    if (std::find(axes.begin(), axes.end(), channel_axis) == axes.end()) {
+      ctx->ReportFatal(Diagnostic::Error(call)
+                       << "channel_axis must be in axes, but got channel_axis: " << channel_axis
+                       << ", axes: " << attrs->axes);
+    }
+    if (const auto* data_shape = data_sinfo->shape.as<ShapeExprNode>()) {
+      std::vector<PrimExpr> grouped_shape(data_shape->values.begin(), data_shape->values.end());
+      // The channel axis is divided by the number of groups.
+      grouped_shape[channel_axis] = floordiv(grouped_shape[channel_axis], attrs->num_groups);
+      grouped_input_sinfo[0] = TensorStructInfo(ShapeExpr(grouped_shape), data_sinfo->dtype);
+    }
+  }
+
+  bool unknown_shape =
+      NormCheckDtypeAndShape(call, ctx, std::move(grouped_input_sinfo), attrs->axes);
+
+  return unknown_shape ? TensorStructInfo(input_sinfo[0]->dtype, input_sinfo[0]->ndim)
+                       : input_sinfo[0];
+}
+
+InferLayoutOutput InferLayoutGroupNorm(const Call& call,
+                                       const Map<String, Array<String>>& desired_layouts,
+                                       const VarLayoutMap& var_layout_map) {
+  ICHECK(NoDesiredLayout(call, desired_layouts));
+  std::vector<NLayout> initial_layouts;
+  for (size_t i = 0; i < 3; ++i) {
+    const auto* tensor_sinfo = GetStructInfoAs<TensorStructInfoNode>(call->args[i]);
+    ICHECK(tensor_sinfo != nullptr) << "Invalid Call";
+    ICHECK(!tensor_sinfo->IsUnknownNdim()) << "Only support known ndim";
+    initial_layouts.push_back(InitialLayoutDecision(tensor_sinfo->ndim));
+  }
+  const auto* attrs = call->attrs.as<GroupNormAttrs>();
+  ICHECK(attrs) << "Invalid Call";
+
+  LayoutDecision layout = GetLayoutDecision(var_layout_map, call->args[0]);
+  ObjectPtr<GroupNormAttrs> new_attrs = make_object<GroupNormAttrs>(*attrs);
+  std::vector<Integer> new_axes;
+  for (const auto& axis : attrs->axes) {
+    new_axes.push_back(FindAxis(layout->layout, axis->value));
+  }
+  new_attrs->axes = std::move(new_axes);
+  new_attrs->channel_axis = FindAxis(layout->layout, attrs->channel_axis);
+  return InferLayoutOutput({layout, initial_layouts[1], initial_layouts[2]}, {layout},
+                           Attrs(new_attrs));
+}
+
+TVM_REGISTER_OP("relax.nn.group_norm")
+    .set_attrs_type<GroupNormAttrs>()
+    .set_num_inputs(3)
+    .add_argument("data", "Tensor", "Input to which batch_norm will be applied.")
+    .add_argument("gamma", "Tensor", "The gamma scale factor.")
+    .add_argument("beta", "Tensor", "The beta offset factor.")
+    .set_attr<FInferStructInfo>("FInferStructInfo", InferStructInfoGroupNorm)
+    .set_attr<FRelaxInferLayout>("FRelaxInferLayout", InferLayoutGroupNorm);
 
 /* relax.nn.dropout */
 TVM_REGISTER_NODE_TYPE(DropoutAttrs);
