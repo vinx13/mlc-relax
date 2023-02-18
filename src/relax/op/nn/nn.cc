@@ -317,34 +317,59 @@ Expr group_norm(Expr data, Expr gamma, Expr beta, int num_groups, int channel_ax
 TVM_REGISTER_GLOBAL("relax.op.nn.group_norm").set_body_typed(group_norm);
 
 StructInfo InferStructInfoGroupNorm(const Call& call, const BlockBuilder& ctx) {
+  Op op = Downcast<Op>(call->op);
   Array<TensorStructInfo> input_sinfo = GetInputTensorStructInfo(call, ctx);
   const auto* attrs = call->attrs.as<GroupNormAttrs>();
 
-  std::vector<TensorStructInfo> grouped_input_sinfo(input_sinfo.begin(), input_sinfo.end());
-
   TensorStructInfo data_sinfo = input_sinfo[0];
+  int channel_axis = -1;
   if (!data_sinfo->IsUnknownNdim()) {
-    int channel_axis = NormalizeAxis(call, ctx, data_sinfo->ndim, attrs->channel_axis);
+    channel_axis = NormalizeAxis(call, ctx, data_sinfo->ndim, attrs->channel_axis);
     std::vector<int> axes = NormalizeAxes(call, ctx, data_sinfo->ndim, attrs->axes);
     // channel_axis must be in axes.
-    if (std::find(axes.begin(), axes.end(), channel_axis) == axes.end()) {
+    if (std::find(axes.begin(), axes.end(), channel_axis) != axes.end()) {
       ctx->ReportFatal(Diagnostic::Error(call)
-                       << "channel_axis must be in axes, but got channel_axis: " << channel_axis
-                       << ", axes: " << attrs->axes);
-    }
-    if (const auto* data_shape = data_sinfo->shape.as<ShapeExprNode>()) {
-      std::vector<PrimExpr> grouped_shape(data_shape->values.begin(), data_shape->values.end());
-      // The channel axis is divided by the number of groups.
-      grouped_shape[channel_axis] = floordiv(grouped_shape[channel_axis], attrs->num_groups);
-      grouped_input_sinfo[0] = TensorStructInfo(ShapeExpr(grouped_shape), data_sinfo->dtype);
+                       << op
+                       << " expects that channel_axis must not be in axes, but got channel_axis: "
+                       << channel_axis << ", axes: " << attrs->axes);
     }
   }
-
-  bool unknown_shape =
-      NormCheckDtypeAndShape(call, ctx, std::move(grouped_input_sinfo), attrs->axes);
-
-  return unknown_shape ? TensorStructInfo(input_sinfo[0]->dtype, input_sinfo[0]->ndim)
-                       : input_sinfo[0];
+  if (!data_sinfo->IsUnknownDtype() && !data_sinfo->dtype.is_float()) {
+    ctx->ReportFatal(Diagnostic::Error(call)
+                     << op << " expects that data must be float, but got " << data_sinfo->dtype);
+  }
+  arith::Analyzer* analyzer = ctx->GetAnalyzer();
+  const auto* data_shape = data_sinfo->shape.as<ShapeExprNode>();
+  if (data_shape != nullptr && channel_axis != -1 &&
+      analyzer->CanProve(floormod(data_shape->values[channel_axis], attrs->num_groups) != 0)) {
+    ctx->ReportFatal(Diagnostic::Error(call)
+                     << op << " expects that the size of channel_axis must be divisible by "
+                     << attrs->num_groups << ", but got " << data_shape->values[channel_axis]);
+  }
+  for (int i = 1; i < op->arguments.size(); ++i) {
+    if (input_sinfo[i]->dtype != data_sinfo->dtype) {
+      ctx->ReportFatal(Diagnostic::Error(call)
+                       << op << " expects that all inputs must have the same dtype, but got "
+                       << input_sinfo[i]->dtype << " and " << data_sinfo->dtype);
+    } else if (input_sinfo[i]->ndim != 1) {
+      ctx->ReportFatal(Diagnostic::Error(call)
+                       << op << " expects that all inputs must have ndim=1, but got "
+                       << input_sinfo[i]->ndim);
+    } else if (channel_axis != -1) {
+      const auto* shape = input_sinfo[i]->shape.as<ShapeExprNode>();
+      if (shape != nullptr && data_shape != nullptr) {
+        PrimExpr channel_size = data_shape->values[channel_axis];
+        PrimExpr input_size = shape->values[0];
+        if (analyzer->CanProve(channel_size != input_size)) {
+          ctx->ReportFatal(Diagnostic::Error(call)
+                           << op << " expects that the size of input " << i
+                           << " must be equal to the size of channel_axis, but got " << input_size
+                           << " and " << channel_size);
+        }
+      }
+    }
+  }
+  return data_sinfo;
 }
 
 InferLayoutOutput InferLayoutGroupNorm(const Call& call,

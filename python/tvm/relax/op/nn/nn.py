@@ -564,7 +564,7 @@ def group_norm(
         The index of the channel axis in the input data.
 
     axes : Union[int, List[int]]
-        The axes that along which the normalization is applied (including the channel axis)
+        The axes that along which the normalization is applied (excluding the group axis)
 
     epsilon : float
         Small float added to variance to avoid dividing by zero.
