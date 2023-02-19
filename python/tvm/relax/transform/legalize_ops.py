@@ -573,15 +573,6 @@ def _nn_layer_norm(bb: BlockBuilder, call: Call) -> Expr:
 
 
 def _nn_group_norm(bb: BlockBuilder, call: Call) -> Expr:
-    reshaped_data = bb.call_te(
-        topi.reshape,
-        call.args[0],
-        newshape=(
-            call.args[0].shape[0],
-            call.attrs.num_groups,
-            -1,
-        ),
-    )
     return bb.call_te(
         topi.nn.group_norm,
         call.args[0],
