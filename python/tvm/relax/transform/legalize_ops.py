@@ -572,6 +572,28 @@ def _nn_layer_norm(bb: BlockBuilder, call: Call) -> Expr:
     )
 
 
+def _nn_group_norm(bb: BlockBuilder, call: Call) -> Expr:
+    reshaped_data = bb.call_te(
+        topi.reshape,
+        call.args[0],
+        newshape=(
+            call.args[0].shape[0],
+            call.attrs.num_groups,
+            -1,
+        ),
+    )
+    return bb.call_te(
+        topi.nn.group_norm,
+        call.args[0],
+        call.args[1],
+        call.args[2],
+        call.attrs.num_groups,
+        call.attrs.channel_axis,
+        call.attrs.axes,
+        call.attrs.epsilon,
+    )
+
+
 def _nn_dropout(bb: BlockBuilder, call: Call) -> Expr:
     logging.info("Dropout is handled by frontend translator at this moment and is not legalized.")
     return call
@@ -693,6 +715,7 @@ DEFAULT_OP_LEGALIZE_MAP: Dict[str, LegalizeFunc] = {
     "relax.nn.cross_entropy_with_logits": _nn_cross_entropy_with_logits,
     "relax.nn.batch_norm": _nn_batch_norm,
     "relax.nn.layer_norm": _nn_layer_norm,
+    "relax.nn.group_norm": _nn_group_norm,
     "relax.nn.dropout": _nn_dropout,
     "relax.nn.nll_loss": _nn_nll_loss,
     # Image
