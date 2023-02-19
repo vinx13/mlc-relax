@@ -846,6 +846,7 @@ void ReverseComputeInlineImpl(ScheduleState self, const StmtSRef& consumer_block
   // Step 3. Check if the consumer has a single complete producer
   StmtSRef producer_block_sref =
       NonSingleProducerError::Check(self, consumer_block_sref, scope_root_sref);
+  CheckNotOutputBlock(self, producer_block_sref, scope_root_sref);
   // Step 4. Analyze the block body
   ReverseComputeInliner inliner(inlined_buffer, producer_block_sref->StmtAs<BlockNode>(),
                                 consumer_block_realize, scope_root_sref, self->mod);
