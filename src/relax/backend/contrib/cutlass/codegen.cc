@@ -268,7 +268,47 @@ Array<runtime::Module> CUTLASSCompiler(Array<Function> functions, Map<String, Ob
   return compiled_functions;
 }
 
+String GetCutlassCSource(const String& pattern_name, const String& ext_func_id,
+                         const Array<String>& func_args, const Array<String>& output_types,
+                         const Map<String, ObjectRef>& attribute_args) {
+  int buf_idx = 0;
+  std::vector<std::string> func_args_vec;
+  for (const auto& arg : func_args) {
+    func_args_vec.push_back(arg);
+  }
+  std::vector<std::string> output_types_vec;
+  for (const auto& type : output_types) {
+    output_types_vec.push_back(type);
+  }
+  Str2StrMap attribute_args_map;
+  if (std::string(pattern_name).find("conv2d") != std::string::npos) {
+    attribute_args_map = Conv2dArgs(attribute_args);
+  } else {
+    LOG(FATAL) << "Unsupported pattern: " << pattern_name;
+  }
+  auto out = contrib::GenerateBody(pattern_name, ext_func_id, func_args_vec, output_types_vec,
+                                   attribute_args_map, &buf_idx);
+  std::ostringstream code_stream_;
+  // print function header
+  code_stream_ << EmitHeaders();
+  code_stream_ << "namespace {\n";
+  code_stream_ << "void " << ext_func_id << "_(";
+  for (const auto& arg_name : func_args) {
+    code_stream_ << "DLTensor* " << arg_name << ", ";
+  }
+  for (size_t i = 0; i < output_types.size() - 1; ++i) {
+    code_stream_ << "DLTensor* out" << i << ", ";
+  }
+  code_stream_ << "DLTensor* out" << output_types.size() - 1 << ") {\n";
+  code_stream_ << out.decl;
+  code_stream_ << "}\n";
+  code_stream_ << "}  // namespace\n";
+  code_stream_ << "TVM_DLL_EXPORT_TYPED_FUNC({global_symbol}, " << ext_func_id << "_);\n ";
+  return code_stream_.str();
+}
+
 TVM_REGISTER_GLOBAL("relax.ext.cutlass").set_body_typed(CUTLASSCompiler);
+TVM_REGISTER_GLOBAL("relax.ext.cutlass.get_source").set_body_typed(GetCutlassCSource);
 
 }  // namespace contrib
 }  // namespace relax

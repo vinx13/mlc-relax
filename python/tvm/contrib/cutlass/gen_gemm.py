@@ -264,7 +264,10 @@ class CutlassGemmProfiler:
             arg0_layout,
             arg1_layout,
         )
+        print("Profile Gemm workload:")
+        print(workload)
         if workload in self.cache:
+            print(">>>>use cached result.")
             op = self.cache[workload]
             return op
 

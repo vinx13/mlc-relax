@@ -267,10 +267,10 @@ class CutlassConv2DProfiler:
             dilation[0],
             dilation[1],
         )
-        print("Profile workload:")
+        print("Profile Conv2d workload:")
         print(workload)
         if workload in self.cache:
-            print("Use cached result.")
+            print(">>>>use cached result.")
             return self.cache[workload]
 
         ops = GENERATOR_FUNC_TABLE[self.sm](

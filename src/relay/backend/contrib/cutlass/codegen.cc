@@ -507,6 +507,7 @@ std::string EmitHeaders() {
   out << "#include <cstdlib>\n";
   out << "#include <cstring>\n";
   out << "#include <vector>\n";
+  out << "#define DMLC_USE_LOGGING_LIBRARY <tvm/runtime/logging.h>\n";
   out << "#include <tvm/runtime/c_runtime_api.h>\n";
   out << "#include <tvm/runtime/packed_func.h>\n";
   out << "#include <dlpack/dlpack.h>\n";

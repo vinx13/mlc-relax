@@ -281,6 +281,52 @@ def conv2d_nhwc_fp16(
             )
 
 
+@T.prim_func
+def bias_add_nhwc_fp16(
+    A_handle: T.handle,
+    B_handle: T.handle,
+    out_handle: T.handle,
+    N: T.int64,
+    H: T.int64,
+    W: T.int64,
+    C: T.int64,
+):
+    A = T.match_buffer(A_handle, [N, H, W, C], dtype="float16")
+    B = T.match_buffer(B_handle, [1, 1, 1, C], dtype="float16")
+    out = T.match_buffer(out_handle, [N, H, W, C], dtype="float16")
+    for ax0, ax1, ax2, ax3 in T.grid(N, H, W, C):
+        with T.block("T_add"):
+            v_ax0, v_ax1, v_ax2, v_ax3 = T.axis.remap("SSSS", [ax0, ax1, ax2, ax3])
+            T.reads(A[v_ax0, v_ax1, v_ax2, v_ax3], B[v_ax0, T.int64(0), T.int64(0), v_ax3])
+            T.writes(out[v_ax0, v_ax1, v_ax2, v_ax3])
+            out[v_ax0, v_ax1, v_ax2, v_ax3] = (
+                A[v_ax0, v_ax1, v_ax2, v_ax3] + B[v_ax0, T.int64(0), T.int64(0), v_ax3]
+            )
+
+
+@T.prim_func
+def elem_add_4d_fp16(
+    A_handle: T.handle,
+    B_handle: T.handle,
+    out_handle: T.handle,
+    N: T.int64,
+    H: T.int64,
+    W: T.int64,
+    C: T.int64,
+):
+    A = T.match_buffer(A_handle, [N, H, W, C], dtype="float16")
+    B = T.match_buffer(B_handle, [N, H, W, C], dtype="float16")
+    out = T.match_buffer(out_handle, [N, H, W, C], dtype="float16")
+    for ax0, ax1, ax2, ax3 in T.grid(N, H, W, C):
+        with T.block("T_add"):
+            v_ax0, v_ax1, v_ax2, v_ax3 = T.axis.remap("SSSS", [ax0, ax1, ax2, ax3])
+            T.reads(A[v_ax0, v_ax1, v_ax2, v_ax3], B[v_ax0, v_ax1, v_ax2, v_ax3])
+            T.writes(out[v_ax0, v_ax1, v_ax2, v_ax3])
+            out[v_ax0, v_ax1, v_ax2, v_ax3] = (
+                A[v_ax0, v_ax1, v_ax2, v_ax3] + B[v_ax0, v_ax1, v_ax2, v_ax3]
+            )
+
+
 def get_cutlass_pattern() -> List[tvm.tir.PrimFunc]:
     """Get the patterns for cutlass dispatch."""
     return [
@@ -293,4 +339,6 @@ def get_cutlass_pattern() -> List[tvm.tir.PrimFunc]:
         copy_4d_nhwc_fp16,
         padding_2d_nhwc_fp16,
         conv2d_nhwc_fp16,
+        bias_add_nhwc_fp16,
+        elem_add_4d_fp16,
     ]

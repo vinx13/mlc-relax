@@ -324,6 +324,11 @@ def num_cutlass_partitions(mod):
     return sum([(1 if "cutlass" in var.name_hint else 0) for var in mod.get_global_vars()])
 
 
+def codegen_cutlass_c_source(pattern_name, ext_func_id, func_args, output_types, attribute_args):
+    func = tvm.get_global_func("relax.ext.cutlass.get_source")
+    return func(pattern_name, ext_func_id, func_args, output_types, attribute_args)
+
+
 def tune_cutlass_kernels(
     mod,
     sm,
