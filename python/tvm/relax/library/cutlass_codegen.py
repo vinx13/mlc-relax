@@ -174,10 +174,11 @@ def conv2d_bias_residual_add(match_results, attr, get_code=True):
         and H_bias == H_add
         and W_bias == W_add
         and C_bias == C_add
-        and out_bias == in1_add
+        and (out_bias == in1_add or out_bias == in2_add)
     ):
         attr["op_type"] = "cutlass.conv2d_bias_residual_add"
         return [_get_graph_pattern_cutlass_code(attr=attr), 4] if get_code else True
+    return None
 
 
 def conv2d_bias(match_results, attr, get_code=True):

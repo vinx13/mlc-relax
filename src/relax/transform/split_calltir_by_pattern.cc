@@ -712,10 +712,12 @@ class SplitMutator : public ExprMutator {
           tir::SplitFunctions(func, &arg_partition, patterns_, fcodegen_);
       if (!split_funcs.second.defined()) {
         // no need to split, the function itself a library kernel
-        // emit the call to the library kernel
         tvm::BaseFunc lib_func = CodegenWithLibrary(split_funcs.first.get(), gv->name_hint);
         if (lib_func->IsInstance<tir::PrimFuncNode>()) return GetRef<Call>(op);
+        // Update the function in the module with the library kernel
         ICHECK(lib_func->IsInstance<ExternFuncNode>());
+        builder_->UpdateFunction(gv, lib_func);
+        // emit the call to the library kernel
         ObjectPtr<CallNode> new_call = make_object<CallNode>(*call.operator->());
         new_call->args = {lib_func, call->args[1]};
         return Call(new_call);
@@ -732,6 +734,7 @@ class SplitMutator : public ExprMutator {
       tvm::BaseFunc lib_func = CodegenWithLibrary(func1.get(), gv->name_hint);
       if (lib_func->IsInstance<tir::PrimFuncNode>()) return GetRef<Call>(op);
       ICHECK(lib_func->IsInstance<ExternFuncNode>());
+      builder_->UpdateFunction(gv, lib_func);
       tir::Buffer intermediate_buffer = func1->buffer_map.at(func1->params.back());
       DataType dtype = intermediate_buffer->dtype;
       Call call1(call_tir_op_, {lib_func, Tuple(args1)}, call->attrs,

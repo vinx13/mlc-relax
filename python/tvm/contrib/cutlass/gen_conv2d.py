@@ -285,7 +285,7 @@ class CutlassConv2DProfiler:
             use_3xtf32,
             profile_all_alignments,
             # Use fp32 accumulation for wgrad to align with cuDNN
-            accumlator_dtype="float32",  #  if conv_kind == ConvKind.Wgrad else out_dtype,
+            accumlator_dtype="float16",  #  if conv_kind == ConvKind.Wgrad else out_dtype,
         )
 
         if not find_first_valid:
@@ -299,11 +299,13 @@ class CutlassConv2DProfiler:
         for op in ops:
             out = self.engine.evaluate(op, args.split(" "))
             op["runtime"] = out
+            print(op["name"], op["runtime"])
             if out < float("inf") and find_first_valid:
                 self.cache[workload] = op
                 return op
 
         op = min(ops, key=lambda i: i["runtime"])
+        print(">>>>select op:", op["name"], op["runtime"])
         self.cache[workload] = op
         with open(self.cache_path, "wb") as f:
             pickle.dump(self.cache, f)
