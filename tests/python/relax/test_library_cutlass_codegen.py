@@ -32,8 +32,6 @@ from tvm.script.ir_builder import IRBuilder
 
 from tvm.relax.library import get_cutlass_pattern, cutlass_fcodegen
 
-PKG_FILE = "/tmp/test_transform_cutlass_codegen.so"
-GLOBAL_SYMBOL = "HGEMM"
 A_TYPE = "float16"
 B_TYPE = "float16"
 C_TYPE = "float16"
@@ -46,16 +44,20 @@ def f_run(rt_mod: runtime.Module, device: runtime.ndarray.Device, *input):
     return vm["main"](*input)
 
 
-def build(mod, file_name=PKG_FILE):
+def build(mod):
     mod = relax.transform.LegalizeOps()(mod)
     mod = relax.transform.AnnotateTIROpPattern()(mod)
     mod = relax.transform.FuseOps()(mod)
     mod = relax.transform.FuseTIR()(mod)
     mod = relax.transform.SplitCallTIRByPattern(get_cutlass_pattern(), cutlass_fcodegen())(mod)
     mod = relax.transform.RemoveUnusedFunctions()(mod)
+    print(mod.script())
+    f = tempfile.NamedTemporaryFile(suffix=".so", delete=True)
     executable = relax_build(mod, target)
-    executable.mod.export_library(file_name, cc="nvcc")
-    return executable
+    executable.mod.export_library(f.name, cc="nvcc")
+    rt_mod = runtime.load_module(f.name)
+    f.close()
+    return rt_mod
 
 
 def constructGEMM(M, N, K):
@@ -81,13 +83,12 @@ def constructGEMM(M, N, K):
 @tvm.testing.requires_cutlass
 def test_cutlass_dense():
     m, n, k = 128, 128, 128
-    build(constructGEMM(m, n, k))
+    executable = build(constructGEMM(m, n, k))
     dev = tvm.cuda()
     A = np.random.rand(m, k).astype("float16") * 5
     B = np.random.rand(k, n).astype("float16") * 5
     A_tvm = tvm.nd.array(A, dev)
     B_tvm = tvm.nd.array(B, dev)
-    executable = tvm.runtime.load_module(PKG_FILE)
     result = f_run(executable, dev, A_tvm, B_tvm)
     np.testing.assert_allclose(result.numpy(), A @ B, rtol=1e-2)
 
@@ -119,7 +120,7 @@ def constructGEMM_bias(M, N, K):
 @tvm.testing.requires_cutlass
 def test_cutlass_dense_bias():
     m, n, k = 128, 128, 128
-    build(constructGEMM_bias(m, n, k))
+    executable = build(constructGEMM_bias(m, n, k))
     dev = tvm.cuda()
     A = np.random.rand(m, k).astype("float16") * 5
     B = np.random.rand(k, n).astype("float16") * 5
@@ -127,7 +128,6 @@ def test_cutlass_dense_bias():
     A_tvm = tvm.nd.array(A, dev)
     B_tvm = tvm.nd.array(B, dev)
     bias_tvm = tvm.nd.array(bias, dev)
-    executable = tvm.runtime.load_module(PKG_FILE)
     result = f_run(executable, dev, A_tvm, B_tvm, bias_tvm)
     np.testing.assert_allclose(result.numpy(), A @ B + bias, rtol=1e-2)
 
@@ -160,7 +160,7 @@ def constructGEMM_bias_relu(M, N, K):
 @tvm.testing.requires_cutlass
 def test_cutlass_dense_bias_relu():
     m, n, k = 128, 128, 128
-    build(constructGEMM_bias_relu(m, n, k))
+    executable = build(constructGEMM_bias_relu(m, n, k))
     dev = tvm.cuda()
     A = np.random.rand(m, k).astype("float16") * 5
     B = np.random.rand(k, n).astype("float16") * 5
@@ -168,7 +168,6 @@ def test_cutlass_dense_bias_relu():
     A_tvm = tvm.nd.array(A, dev)
     B_tvm = tvm.nd.array(B, dev)
     bias_tvm = tvm.nd.array(bias, dev)
-    executable = tvm.runtime.load_module(PKG_FILE)
     result = f_run(executable, dev, A_tvm, B_tvm, bias_tvm)
     np.testing.assert_allclose(result.numpy(), np.maximum(A @ B + bias, 0), rtol=1e-2)
 
@@ -196,13 +195,12 @@ def constructBatchGEMM(batch, M, N, K):
 @tvm.testing.requires_cutlass
 def test_cutlass_batch_dense():
     b, m, n, k = 2, 128, 128, 128
-    build(constructBatchGEMM(b, m, n, k))
+    executable = build(constructBatchGEMM(b, m, n, k))
     dev = tvm.cuda()
     A = np.random.rand(b, m, k).astype("float16") * 5
     B = np.random.rand(k, n).astype("float16") * 5
     A_tvm = tvm.nd.array(A, dev)
     B_tvm = tvm.nd.array(B, dev)
-    executable = tvm.runtime.load_module(PKG_FILE)
     result = f_run(executable, dev, A_tvm, B_tvm)
     np.testing.assert_allclose(result.numpy(), A @ B, rtol=1e-2)
 
@@ -230,13 +228,12 @@ def constructBatchGEMM2(batch, M, N, K):
 @tvm.testing.requires_cutlass
 def test_cutlass_batch_dense2():
     b, m, n, k = 2, 128, 128, 128
-    build(constructBatchGEMM2(b, m, n, k))
+    executable = build(constructBatchGEMM2(b, m, n, k))
     dev = tvm.cuda()
     A = np.random.rand(b, m, k).astype("float16") * 5
     B = np.random.rand(b, k, n).astype("float16") * 5
     A_tvm = tvm.nd.array(A, dev)
     B_tvm = tvm.nd.array(B, dev)
-    executable = tvm.runtime.load_module(PKG_FILE)
     result = f_run(executable, dev, A_tvm, B_tvm)
     np.testing.assert_allclose(result.numpy(), A @ B, rtol=1e-2)
 
@@ -268,7 +265,7 @@ def constructBatchGEMM_bias(batch, M, N, K):
 @tvm.testing.requires_cutlass
 def test_cutlass_batch_dense_bias():
     b, m, n, k = 2, 128, 128, 128
-    build(constructBatchGEMM_bias(b, m, n, k))
+    executable = build(constructBatchGEMM_bias(b, m, n, k))
     dev = tvm.cuda()
     A = np.random.rand(b, m, k).astype("float16") * 5
     B = np.random.rand(k, n).astype("float16") * 5
@@ -276,7 +273,6 @@ def test_cutlass_batch_dense_bias():
     A_tvm = tvm.nd.array(A, dev)
     B_tvm = tvm.nd.array(B, dev)
     bias_tvm = tvm.nd.array(bias, dev)
-    executable = tvm.runtime.load_module(PKG_FILE)
     result = f_run(executable, dev, A_tvm, B_tvm, bias_tvm)
     np.testing.assert_allclose(result.numpy(), A @ B + bias, rtol=1e-2)
 
@@ -308,7 +304,7 @@ def constructBatchGEMM2_bias(batch, M, N, K):
 @tvm.testing.requires_cutlass
 def test_cutlass_batch_dense2_bias():
     b, m, n, k = 2, 128, 128, 128
-    build(constructBatchGEMM2_bias(b, m, n, k))
+    executable = build(constructBatchGEMM2_bias(b, m, n, k))
     dev = tvm.cuda()
     A = np.random.rand(b, m, k).astype("float16") * 5
     B = np.random.rand(b, k, n).astype("float16") * 5
@@ -316,7 +312,6 @@ def test_cutlass_batch_dense2_bias():
     A_tvm = tvm.nd.array(A, dev)
     B_tvm = tvm.nd.array(B, dev)
     bias_tvm = tvm.nd.array(bias, dev)
-    executable = tvm.runtime.load_module(PKG_FILE)
     result = f_run(executable, dev, A_tvm, B_tvm, bias_tvm)
     np.testing.assert_allclose(result.numpy(), A @ B + bias, rtol=1e-2)
 
@@ -369,15 +364,15 @@ def test_cutlass_conv2d():
     for strides in [(1, 1), (2, 2)]:
         for padding in [(0, 0), (3, 3)]:
             for dilation in [(1, 1), (4, 4)]:
-                filename = "/tmp/" + "test_transform_cutlass_codegen" + str(counter) + ".so"
-                build(constructConv2D(n, c, h, w, kh, kw, o, strides, padding, dilation), filename)
+                executable = build(
+                    constructConv2D(n, c, h, w, kh, kw, o, strides, padding, dilation)
+                )
                 dev = tvm.cuda()
                 np.random.seed(0)
                 A = np.random.rand(n, h, w, c).astype("float16")
                 B = np.random.rand(o, kh, kw, c).astype("float16")
                 A_tvm = tvm.nd.array(A, dev)
                 B_tvm = tvm.nd.array(B, dev)
-                executable = tvm.runtime.load_module(filename)
                 result = f_run(executable, dev, A_tvm, B_tvm)
                 A_torch = torch.from_numpy(np.transpose(A, (0, 3, 1, 2))).to(
                     torch.float32
@@ -447,9 +442,8 @@ def test_cutlass_conv2d_bias():
         for padding in [(0, 0), (3, 3)]:
             for dilation in [(1, 1), (4, 4)]:
                 filename = "/tmp/" + "test_transform_cutlass_codegen" + str(counter) + ".so"
-                build(
+                executable = build(
                     constructConv2D_bias(n, c, h, w, kh, kw, o, strides, padding, dilation),
-                    filename,
                 )
                 dev = tvm.cuda()
                 np.random.seed(0)
@@ -459,7 +453,6 @@ def test_cutlass_conv2d_bias():
                 A_tvm = tvm.nd.array(A, dev)
                 B_tvm = tvm.nd.array(B, dev)
                 bias_tvm = tvm.nd.array(bias.reshape(1, 1, 1, o), dev)
-                executable = tvm.runtime.load_module(filename)
                 result = f_run(executable, dev, A_tvm, B_tvm, bias_tvm)
                 A_torch = torch.from_numpy(np.transpose(A, (0, 3, 1, 2))).to(
                     torch.float32
@@ -538,14 +531,12 @@ def test_cutlass_conv2d_bias_add():
     for strides in [(1, 1), (2, 2)]:
         for padding in [(0, 0), (3, 3)]:
             for dilation in [(1, 1), (4, 4)]:
-                filename = "/tmp/" + "test_transform_cutlass_codegen" + str(counter) + ".so"
                 oh = (h + 2 * padding[0] - dilation[0] * (kh - 1) - 1) // strides[0] + 1
                 ow = (w + 2 * padding[1] - dilation[1] * (kw - 1) - 1) // strides[1] + 1
-                build(
+                executable = build(
                     constructConv2D_bias_add(
                         n, c, h, w, kh, kw, o, oh, ow, strides, padding, dilation
-                    ),
-                    filename,
+                    )
                 )
                 dev = tvm.cuda()
                 np.random.seed(0)
@@ -557,7 +548,6 @@ def test_cutlass_conv2d_bias_add():
                 B_tvm = tvm.nd.array(B, dev)
                 bias_tvm = tvm.nd.array(bias.reshape(1, 1, 1, o), dev)
                 res_tvm = tvm.nd.array(res, dev)
-                executable = tvm.runtime.load_module(filename)
                 result = f_run(executable, dev, A_tvm, B_tvm, bias_tvm, res_tvm)
                 A_torch = torch.from_numpy(np.transpose(A, (0, 3, 1, 2))).to(
                     torch.float32
