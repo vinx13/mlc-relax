@@ -77,16 +77,28 @@ cudaError_t CutlassGemmRCR(
                               {C, ldc},
                               {alpha, beta});
   cutlass::Status status = gemm_operator(args);
-  CUTLASS_CHECK(status)
+  CUTLASS_CHECK(status);
 
-  high_resolution_clock::time_point t1 = high_resolution_clock::now();
-  for (int i = 0; i < 100; ++i) {
-    status = gemm_operator(args);
+  cudaEvent_t events[2];
+  for (auto & event : events) {
+    cudaEventCreate(&event);
   }
-  cudaDeviceSynchronize();
-  high_resolution_clock::time_point t2 = high_resolution_clock::now();
-  duration<double> time_span = duration_cast<duration<double>>(t2 - t1);
-  std::cout << time_span.count() << std::endl;
+  cudaEventRecord(events[0]);
+  
+  for (int i = 0; i < 20; ++i) {
+    status = gemm_operator(args);
+    CUTLASS_CHECK(status);
+  }
+  cudaEventRecord(events[1]);
+  cudaEventSynchronize(events[1]);
+  
+  float runtime_ms = 0;
+  cudaEventElapsedTime(&runtime_ms, events[0], events[1]);
+
+  for (auto event : events) {
+    (void)cudaEventDestroy(event);
+  }
+  std::cout << double(runtime_ms) / 20.0 << std::endl;
   return cudaSuccess;
 }
 

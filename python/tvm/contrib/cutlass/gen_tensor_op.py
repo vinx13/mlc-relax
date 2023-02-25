@@ -309,7 +309,7 @@ def generate_sm80_tensor_op_16816(
     #     else:
     #         op.C.alignment = 8
 
-    return sm80_kernels  #  + sm75_kernels
+    return sm80_kernels + sm75_kernels
 
 
 GENERATOR_FUNC_TABLE = {

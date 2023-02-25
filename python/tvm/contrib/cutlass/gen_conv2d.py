@@ -334,8 +334,15 @@ class CutlassConv2DProfiler:
                 self.cache[workload] = op
                 return op
 
-        op = min(ops, key=lambda i: i["runtime"])
-        print(">>>>select op:", op["name"], op["runtime"])
+        op = min(
+            ops, key=lambda i: (-i["tile_description"].minimum_compute_capability, i["runtime"])
+        )
+        print(
+            ">>>>select op:",
+            op["tile_description"].minimum_compute_capability,
+            op["name"],
+            op["runtime"],
+        )
         self.cache[workload] = op
         with open(self.cache_path, "wb") as f:
             pickle.dump(self.cache, f)

@@ -294,13 +294,22 @@ class CutlassGemmProfiler:
             self.engine.compile_all(ops, use_multiprocessing)
 
         for op in ops:
-            out = self.engine.evaluate(op, [M, N, K])
+            out = self.engine.evaluate(op, [int(M), int(N), int(K)])
             op["runtime"] = out
+            print(op["name"], op["runtime"])
             if out < float("inf") and find_first_valid:
                 self.cache[workload] = op
                 return op
 
-        op = min(ops, key=lambda i: i["runtime"])
+        op = min(
+            ops, key=lambda i: (-i["tile_description"].minimum_compute_capability, i["runtime"])
+        )
+        print(
+            ">>>>select op:",
+            op["tile_description"].minimum_compute_capability,
+            op["name"],
+            op["runtime"],
+        )
         self.cache[workload] = op
         with open(self.cache_path, "wb") as f:
             pickle.dump(self.cache, f)
