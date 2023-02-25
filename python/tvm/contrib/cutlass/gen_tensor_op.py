@@ -174,24 +174,28 @@ def generate_sm80_tensor_op_16816(
 
     def get_default_tile_descriptions(block_k_factor):
         return [
-            ([256, 128, int(32 * block_k_factor)], 3, [4, 2, 1], min_cc, max_cc),
-            ([128, 256, int(32 * block_k_factor)], 3, [2, 4, 1], min_cc, max_cc),
-            ([256, 64, int(32 * block_k_factor)], 4, [4, 1, 1], min_cc, max_cc),
-            ([64, 256, int(32 * block_k_factor)], 4, [1, 4, 1], min_cc, max_cc),
-            ([128, 128, int(32 * block_k_factor)], 3, [2, 2, 1], min_cc, max_cc),
-            ([128, 128, int(32 * block_k_factor)], 4, [2, 2, 1], min_cc, max_cc),
-            ([128, 128, int(32 * block_k_factor)], 5, [2, 2, 1], min_cc, max_cc),
-            ([128, 64, int(32 * block_k_factor)], 6, [2, 2, 1], min_cc, max_cc),
-            ([64, 128, int(32 * block_k_factor)], 6, [2, 2, 1], min_cc, max_cc),
-            ([64, 64, int(32 * block_k_factor)], 10, [2, 2, 1], min_cc, max_cc),
-            ([256, 128, int(64 * block_k_factor)], 3, [4, 2, 1], min_cc, max_cc_smem_limited),
-            ([128, 256, int(64 * block_k_factor)], 3, [2, 4, 1], min_cc, max_cc_smem_limited),
-            ([256, 64, int(64 * block_k_factor)], 4, [4, 1, 1], min_cc, max_cc_smem_limited),
-            ([64, 256, int(64 * block_k_factor)], 4, [1, 4, 1], min_cc, max_cc_smem_limited),
-            ([128, 128, int(64 * block_k_factor)], 4, [2, 2, 1], min_cc, max_cc),
-            ([128, 64, int(64 * block_k_factor)], 3, [2, 2, 1], min_cc, max_cc),
-            ([64, 128, int(64 * block_k_factor)], 3, [2, 2, 1], min_cc, max_cc),
-            ([64, 64, int(64 * block_k_factor)], 5, [2, 2, 1], min_cc, max_cc),
+            ([128, 256, 32 * block_k_factor], 3, [2, 4, 1], min_cc, max_cc),
+            ([256, 128, 32 * block_k_factor], 3, [4, 2, 1], min_cc, max_cc),
+            ([256, 64, 32 * block_k_factor], 3, [4, 1, 1], min_cc, max_cc),
+            ([256, 64, 32 * block_k_factor], 4, [4, 1, 1], min_cc, max_cc),
+            ([64, 256, 32 * block_k_factor], 4, [1, 4, 1], min_cc, max_cc),
+            ([128, 128, 32 * block_k_factor], 3, [2, 2, 1], min_cc, max_cc),
+            ([128, 128, 32 * block_k_factor], 4, [2, 2, 1], min_cc, max_cc),
+            ([128, 128, 32 * block_k_factor], 5, [2, 2, 1], min_cc, max_cc),
+            ([128, 64, 32 * block_k_factor], 6, [2, 2, 1], min_cc, max_cc),
+            ([64, 128, 32 * block_k_factor], 6, [2, 2, 1], min_cc, max_cc),
+            ([64, 64, 32 * block_k_factor], 10, [2, 2, 1], min_cc, max_cc),
+            ([256, 128, 64 * block_k_factor], 3, [4, 2, 1], min_cc, max_cc),
+            ([128, 256, 64 * block_k_factor], 3, [2, 4, 1], min_cc, max_cc),
+            ([256, 64, 64 * block_k_factor], 4, [4, 1, 1], min_cc, max_cc),
+            ([64, 256, 64 * block_k_factor], 4, [1, 4, 1], min_cc, max_cc),
+            ([128, 128, 64 * block_k_factor], 4, [2, 2, 1], min_cc, max_cc),
+            ([256, 64, 64 * block_k_factor], 3, [4, 1, 1], min_cc, max_cc),
+            ([64, 256, 64 * block_k_factor], 3, [1, 4, 1], min_cc, max_cc),
+            ([128, 128, 64 * block_k_factor], 3, [2, 2, 1], min_cc, max_cc),
+            ([128, 64, 64 * block_k_factor], 3, [2, 2, 1], min_cc, max_cc),
+            ([64, 128, 64 * block_k_factor], 3, [2, 2, 1], min_cc, max_cc),
+            ([64, 64, 64 * block_k_factor], 5, [2, 2, 1], min_cc, max_cc),
         ]
 
     if arg0_dtype == "float16" and arg1_dtype == "float16":
@@ -305,7 +309,7 @@ def generate_sm80_tensor_op_16816(
     #     else:
     #         op.C.alignment = 8
 
-    return sm75_kernels + sm80_kernels
+    return sm80_kernels  #  + sm75_kernels
 
 
 GENERATOR_FUNC_TABLE = {
@@ -355,8 +359,8 @@ class ProfilerEngine:
     def _compile(self, op):
         os.makedirs(self.binary_prefix, exist_ok=True)
         opath = os.path.join(self.binary_prefix, op["name"])
-        if os.path.exists(opath):
-            return
+        # if os.path.exists(opath):
+        #     return
         fi = tempfile.NamedTemporaryFile("w", delete=False, prefix=self.binary_prefix, suffix=".cu")
         fi.write(op["src"])
         fi.close()

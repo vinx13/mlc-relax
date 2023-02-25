@@ -178,7 +178,7 @@ double profile_convolution(Options const &options) {
   }
   cudaEventRecord(events[0]);
 
-  for (int iteration = 0; iteration < 10; ++iteration) {
+  for (int iteration = 0; iteration < 20; ++iteration) {
     auto status = implicit_gemm_op();
     CUTLASS_CHECK(status);
     {{Reduction}}
@@ -192,7 +192,7 @@ double profile_convolution(Options const &options) {
   for (auto event : events) {
     (void)cudaEventDestroy(event);
   }
-  return double(runtime_ms) / 10.0;
+  return double(runtime_ms) / 20.0;
 }
 
 int main(int argc, char const **args) {

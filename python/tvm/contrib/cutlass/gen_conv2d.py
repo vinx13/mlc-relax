@@ -42,6 +42,7 @@ def create_conv2d_operator_with_epilogue(
     tile_description,
     data_type,
     alignment,
+    alignment_epilogue,
     swizzling_functor,
     split_k_slices,
 ):
@@ -80,7 +81,7 @@ def create_conv2d_operator_with_epilogue(
 
     A = TensorDescription(element_a, LayoutType.TensorNHWC, alignment)
     B = TensorDescription(element_b, LayoutType.TensorNHWC, alignment)
-    C = TensorDescription(element_c, LayoutType.TensorNHWC, alignment)
+    C = TensorDescription(element_c, LayoutType.TensorNHWC, alignment_epilogue)
 
     op = Conv2dOperation(
         conv_kind,
@@ -112,6 +113,7 @@ def enumerate_conv2d_operators(
     conv_kind,
     stride_support,
     split_k_slices,
+    alignment_c,
     tile_descriptions,
     data_type,
     alignment_constraints,
@@ -131,46 +133,48 @@ def enumerate_conv2d_operators(
     assert layout_constraints == ["NHWC", "NHWC", "NHWC"]
     for split_k_slice in split_k_slices:
         for tile in tile_descriptions:
-            for alignment in alignment_constraints:
+            for alignmentAB in alignment_constraints:
+                for alignmentC in alignment_c:
 
-                A = TensorDescription(element_a, LayoutType.TensorNHWC, alignment)
-                B = TensorDescription(element_b, LayoutType.TensorNHWC, alignment)
-                C = TensorDescription(element_c, LayoutType.TensorNHWC, alignment)
+                    A = TensorDescription(element_a, LayoutType.TensorNHWC, alignmentAB)
+                    B = TensorDescription(element_b, LayoutType.TensorNHWC, alignmentAB)
+                    C = TensorDescription(element_c, LayoutType.TensorNHWC, alignmentC)
 
-                if element_c == DataType.s32 and A.alignment == 1:
-                    tile.threadblock_shape[0] = min(tile.threadblock_shape[0], 128)
-                    tile.threadblock_shape[1] = min(tile.threadblock_shape[1], 128)
+                    if element_c == DataType.s32 and A.alignment == 1:
+                        tile.threadblock_shape[0] = min(tile.threadblock_shape[0], 128)
+                        tile.threadblock_shape[1] = min(tile.threadblock_shape[1], 128)
 
-                op = Conv2dOperation(
-                    conv_kind,
-                    IteratorAlgorithm.Optimized,
-                    tile.minimum_compute_capability,
-                    tile,
-                    A,
-                    B,
-                    C,
-                    element_epilogue,
-                    stride_support,
-                    EpilogueFunctor.LinearCombination,
-                    swizzling_functor,
-                    split_k_slice,
-                )
-                ret.append(
-                    {
-                        "src": profiler_emitter.emit(
-                            kernel_emitter.emit(op, emit_reduction=split_k_slice > 1),
-                            op.procedural_name(),
-                            element_output=element_c,
-                            split_k_slices=split_k_slice,
-                        ),
-                        "name": op.procedural_name(),
-                        "tile_description": tile,
-                        "alignment": alignment,
-                        "data_type": data_type,
-                        "swizzle_functor": swizzling_functor,
-                        "split_k_slices": split_k_slice,
-                    }
-                )
+                    op = Conv2dOperation(
+                        conv_kind,
+                        IteratorAlgorithm.Optimized,
+                        tile.minimum_compute_capability,
+                        tile,
+                        A,
+                        B,
+                        C,
+                        element_epilogue,
+                        stride_support,
+                        EpilogueFunctor.LinearCombination,
+                        swizzling_functor,
+                        split_k_slice,
+                    )
+                    ret.append(
+                        {
+                            "src": profiler_emitter.emit(
+                                kernel_emitter.emit(op, emit_reduction=split_k_slice > 1),
+                                op.procedural_name(),
+                                element_output=element_c,
+                                split_k_slices=split_k_slice,
+                            ),
+                            "name": op.procedural_name(),
+                            "tile_description": tile,
+                            "alignment": alignmentAB,
+                            "alignment_epilogue": alignmentC,
+                            "data_type": data_type,
+                            "swizzle_functor": swizzling_functor,
+                            "split_k_slices": split_k_slice,
+                        }
+                    )
 
     return ret
 
@@ -221,6 +225,7 @@ class CutlassConv2DProfiler:
             op_type,
             tile_description,
             data_type,
+            alignment,
             alignment,
             swizzling_functor,
             split_k_slices=1,
@@ -273,6 +278,23 @@ class CutlassConv2DProfiler:
             print(">>>>use cached result.")
             return self.cache[workload]
 
+        def alignments(dtype):
+            if dtype in ["float16"]:
+                alignments = [8, 4, 2, 1]
+            elif dtype in ["float", "float32"]:
+                alignments = [4, 2, 1]
+            else:
+                raise ValueError("Unsupported data type: %s" % dtype)
+            return alignments
+
+        def max_alignment(dim, alignments):
+            for alignment in alignments:
+                if dim % alignment == 0:
+                    return alignment
+
+        def filter(op):
+            return op["alignment"] != max_alignment(IC, alignments(data_dtype))
+
         ops = GENERATOR_FUNC_TABLE[self.sm](
             out_dtype,
             data_dtype,
@@ -280,13 +302,21 @@ class CutlassConv2DProfiler:
             "NHWC",
             "NHWC",
             "NHWC",
-            partial(enumerate_conv2d_operators, conv_kind, stride_support, split_k_slices),
-            lambda align: all([dim % align == 0 for dim in [IC, OC]]),
+            partial(
+                enumerate_conv2d_operators,
+                conv_kind,
+                stride_support,
+                split_k_slices,
+                [max_alignment(OC, alignments=alignments(out_dtype))],
+            ),
+            lambda align: all([dim % align == 0 for dim in [IC]]),
             use_3xtf32,
             profile_all_alignments,
             # Use fp32 accumulation for wgrad to align with cuDNN
             accumlator_dtype="float16",  #  if conv_kind == ConvKind.Wgrad else out_dtype,
         )
+
+        ops = [op for op in ops if not filter(op)]
 
         if not find_first_valid:
             self.engine.compile_all(ops, use_multiprocessing)
@@ -365,6 +395,7 @@ class CutlassConv2DProfiler:
             op["tile_description"],
             op["data_type"],
             op["alignment"],
+            op["alignment_epilogue"],
             op["swizzle_functor"],
             op["split_k_slices"],
         )

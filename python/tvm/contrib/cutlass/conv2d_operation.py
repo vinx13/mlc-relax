@@ -121,12 +121,12 @@ class Conv2dOperation:
         if self.stride_support == StrideSupport.Unity:
             configuration_name = (
                 "cutlass_${opcode_class}_${extended_name}_${threadblock}"
-                "_${layout}_align${alignment}_unity_stride"
+                "_${layout}_align${alignment}_${alignmentC}_unity_stride"
             )
         else:
             configuration_name = (
                 "cutlass_${opcode_class}_${extended_name}_${threadblock}"
-                "_${layout}_align${alignment}"
+                "_${layout}_align${alignment}_${alignmentC}"
             )
 
         if self.split_k_slices > 1:
@@ -140,6 +140,7 @@ class Conv2dOperation:
                 "threadblock": threadblock,
                 "layout": self.layout_name(),
                 "alignment": "%d" % self.A.alignment,
+                "alignmentC": "%d" % self.C.alignment,
             },
         )
 
