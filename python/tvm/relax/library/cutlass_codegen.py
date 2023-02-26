@@ -30,7 +30,9 @@ from .pattern import (
     MatchResult,
     dense_row_row_row_fp16,
     bias_row_fp16,
+    bias_row_fp16_2,
     batch_bias_row_fp16,
+    batch_bias_row_fp16_2,
     relu_fp16,
     batch_dense_row_row_row_fp16,
     batch_dense_2_row_row_row_fp16,
@@ -38,13 +40,18 @@ from .pattern import (
     padding_2d_nhwc_fp16,
     copy_4d_nhwc_fp16,
     bias_add_nhwc_fp16,
+    bias_add_nhwc_fp16_2,
+    elem_add_2d_fp16,
+    elem_add_3d_fp16,
     elem_add_4d_fp16,
 )
 
 # list representing the anchor ops
 # in the future more layouts/dtypes can be supported
 DENSE_LIST = [dense_row_row_row_fp16]
+DENSE_BIAS_LIST = [bias_row_fp16, bias_row_fp16_2]
 BATCH_DENSE_LIST = [batch_dense_row_row_row_fp16, batch_dense_2_row_row_row_fp16]
+BATCH_DENSE_BIAS_LIST = [batch_bias_row_fp16, batch_bias_row_fp16_2]
 CONV2D_LIST = [conv2d_nhwc_fp16]
 
 # attributes for anchor ops used in code generation
@@ -83,84 +90,74 @@ OP_PATTERN_ATTR_LIST = {
 
 
 def dense_bias_relu(match_results, attr, get_code=True):
-    if len(match_results) != 3:
+    if len(match_results) < 3:
         return None
-    if (
-        match_results[0].pattern in DENSE_LIST
-        and match_results[1].pattern == bias_row_fp16
-        and match_results[2].pattern == relu_fp16
-    ):
-        m_dense, n_dense, k_dense = match_results[0].symbol_values
-        m_bias, n_bias = match_results[1].symbol_values
-        m_relu, n_relu = match_results[2].symbol_values
-        A_dense, B_dense, C_dense = match_results[0].matched_buffers
-        A_bias, B_bias, C_bias = match_results[1].matched_buffers
-        A_relu, B_relu = match_results[2].matched_buffers
-        if (
-            m_dense == m_bias
-            and n_dense == n_bias
-            and m_dense == m_relu
-            and n_dense == n_relu
-            and C_dense == A_bias
-            and C_bias == A_relu
-        ):
-            attr["op_type"] = "cutlass.dense_bias_relu"
-            return [_get_graph_pattern_cutlass_code(attr=attr), 3] if get_code else True
+    attr = dense_bias(match_results[:2], attr, get_code=False)
+    if attr is None or match_results[2].pattern != relu_fp16:
+        return None
+    m_bias, n_bias = match_results[1].symbol_values
+    m_relu, n_relu = match_results[2].symbol_values
+    A_bias, B_bias, C_bias = match_results[1].matched_buffers
+    A_relu, B_relu = match_results[2].matched_buffers
+    if m_bias == m_relu and n_bias == n_relu and C_bias == A_relu:
+        attr["op_type"] = "cutlass.dense_bias_relu"
+        return [_get_graph_pattern_cutlass_code(attr=attr), 3] if get_code else attr
     return None
 
 
 def dense_bias(match_results, attr, get_code=True):
-    if len(match_results) != 2:
+    if len(match_results) < 2:
         return None
-    if match_results[0].pattern in DENSE_LIST and match_results[1].pattern == bias_row_fp16:
-        m_dense, n_dense, k_dense = match_results[0].symbol_values
-        m_bias, n_bias = match_results[1].symbol_values
-        A_dense, B_dense, C_dense = match_results[0].matched_buffers
-        A_bias, B_bias, C_bias = match_results[1].matched_buffers
-        if m_dense == m_bias and n_dense == n_bias and C_dense == A_bias:
-            attr["op_type"] = "cutlass.dense_bias"
-            return [_get_graph_pattern_cutlass_code(attr=attr), 2] if get_code else True
+    attr = dense(match_results[:1], attr, get_code=False)
+    if attr is None or match_results[1].pattern not in DENSE_BIAS_LIST:
+        return None
+    m_dense, n_dense, k_dense = match_results[0].symbol_values
+    m_bias, n_bias = match_results[1].symbol_values
+    A_dense, B_dense, C_dense = match_results[0].matched_buffers
+    A_bias, B_bias, C_bias = match_results[1].matched_buffers
+    if m_dense == m_bias and n_dense == n_bias and C_dense == A_bias:
+        attr["op_type"] = "cutlass.dense_bias"
+        return [_get_graph_pattern_cutlass_code(attr=attr), 2] if get_code else attr
     return None
 
 
 def dense(match_results, attr, get_code=True):
-    if len(match_results) != 1:
+    if len(match_results) < 1:
         return None
     if match_results[0].pattern in DENSE_LIST:
         # dense
         attr["op_type"] = "cutlass.dense"
-        return [_get_graph_pattern_cutlass_code(attr=attr), 1] if get_code else True
+        return [_get_graph_pattern_cutlass_code(attr=attr), 1] if get_code else attr
     return None
 
 
 def batch_dense_bias(match_results, attr, get_code=True):
-    if len(match_results) != 2:
+    if len(match_results) < 2:
         return None
-    if (
-        match_results[0].pattern in BATCH_DENSE_LIST
-        and match_results[1].pattern == batch_bias_row_fp16
-    ):
-        m_dense, n_dense, k_dense, b_dense = match_results[0].symbol_values
-        m_bias, n_bias, b_bias = match_results[1].symbol_values
-        A_dense, B_dense, C_dense = match_results[0].matched_buffers
-        A_bias, B_bias, C_bias = match_results[1].matched_buffers
-        if b_dense == b_bias and m_dense == m_bias and n_dense == n_bias and C_dense == A_bias:
-            attr["op_type"] = "cutlass.batch_matmul_bias"
-            return [_get_graph_pattern_cutlass_code(attr=attr), 2] if get_code else True
+    attr = batch_dense(match_results[:1], attr, get_code=False)
+    if attr is None or match_results[1].pattern not in BATCH_DENSE_BIAS_LIST:
+        return None
+    m_dense, n_dense, k_dense, b_dense = match_results[0].symbol_values
+    m_bias, n_bias, b_bias = match_results[1].symbol_values
+    A_dense, B_dense, C_dense = match_results[0].matched_buffers
+    A_bias, B_bias, C_bias = match_results[1].matched_buffers
+    if b_dense == b_bias and m_dense == m_bias and n_dense == n_bias and C_dense == A_bias:
+        attr["op_type"] = "cutlass.batch_matmul_bias"
+        return [_get_graph_pattern_cutlass_code(attr=attr), 2] if get_code else attr
     return None
 
 
 def batch_dense(match_results, attr, get_code=True):
-    if len(match_results) != 1:
+    if len(match_results) < 1:
         return None
     if match_results[0].pattern in BATCH_DENSE_LIST:
         attr["op_type"] = "cutlass.batch_matmul"
-        return [_get_graph_pattern_cutlass_code(attr=attr), 1] if get_code else True
+        return [_get_graph_pattern_cutlass_code(attr=attr), 1] if get_code else attr
     return None
 
 
 def conv2d_bias_residual_add(match_results, attr, get_code=True):
-    if len(match_results) != 4:
+    if len(match_results) < 4:
         return None
     attr = conv2d_bias(match_results[:3], attr, get_code=False)
     if attr is None or match_results[3].pattern != elem_add_4d_fp16:
@@ -177,15 +174,15 @@ def conv2d_bias_residual_add(match_results, attr, get_code=True):
         and (out_bias == in1_add or out_bias == in2_add)
     ):
         attr["op_type"] = "cutlass.conv2d_bias_residual_add"
-        return [_get_graph_pattern_cutlass_code(attr=attr), 4] if get_code else True
+        return [_get_graph_pattern_cutlass_code(attr=attr), 4] if get_code else attr
     return None
 
 
 def conv2d_bias(match_results, attr, get_code=True):
-    if len(match_results) != 3:
+    if len(match_results) < 3:
         return None
     attr = conv2d(match_results[:2], attr, get_code=False)
-    if attr is None or match_results[2].pattern != bias_add_nhwc_fp16:
+    if attr is None or (match_results[2].pattern not in [bias_add_nhwc_fp16, bias_add_nhwc_fp16_2]):
         return None
     (N_conv, pH_conv, pW_conv, H_conv, W_conv, C_conv, O_conv,) = match_results[
         1
@@ -206,7 +203,7 @@ def conv2d_bias(match_results, attr, get_code=True):
 
 
 def conv2d(match_results, attr, get_code=True):
-    if len(match_results) != 2:
+    if len(match_results) < 2:
         return None
     if (
         match_results[0].pattern in [padding_2d_nhwc_fp16, copy_4d_nhwc_fp16]
@@ -334,7 +331,6 @@ def cutlass_fcodegen(sm=80, bin_dir="./bin"):
             dense,
             batch_dense,
         ]
-
         for pattern in cutlass_patterns:
             res = pattern(match_results, attr)
             if res is not None:

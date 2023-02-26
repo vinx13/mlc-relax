@@ -87,6 +87,29 @@ def bias_row_fp16(
 
 
 @T.prim_func
+def bias_row_fp16_2(
+    var_rxplaceholder: T.handle,
+    var_rxplaceholder_1: T.handle,
+    var_T_add: T.handle,
+    M: T.int64,
+    N: T.int64,
+) -> None:
+    # function attr dict
+    T.func_attr({"tir.noalias": True})
+    rxplaceholder = T.match_buffer(var_rxplaceholder, [M, N], dtype="float16")
+    rxplaceholder_1 = T.match_buffer(var_rxplaceholder_1, [N], dtype="float16")
+    T_add = T.match_buffer(var_T_add, [M, N], dtype="float16")
+    # body
+    # with T.block("root")
+    for i0, i1 in T.grid(M, N):
+        with T.block("T_add"):
+            ax0, ax1 = T.axis.remap("SS", [i0, i1])
+            T.reads(rxplaceholder[ax0, ax1], rxplaceholder_1[ax1])
+            T.writes(T_add[ax0, ax1])
+            T_add[ax0, ax1] = rxplaceholder[ax0, ax1] + rxplaceholder_1[ax1]
+
+
+@T.prim_func
 def batch_bias_row_fp16(
     var_rxplaceholder: T.handle,
     var_rxplaceholder_1: T.handle,
@@ -108,6 +131,30 @@ def batch_bias_row_fp16(
             T.reads(rxplaceholder[ax0, ax1, ax2], rxplaceholder_1[T.int64(0), ax2])
             T.writes(T_add[ax0, ax1, ax2])
             T_add[ax0, ax1, ax2] = rxplaceholder[ax0, ax1, ax2] + rxplaceholder_1[T.int64(0), ax2]
+
+
+@T.prim_func
+def batch_bias_row_fp16_2(
+    var_rxplaceholder: T.handle,
+    var_rxplaceholder_1: T.handle,
+    var_T_add: T.handle,
+    M: T.int64,
+    N: T.int64,
+    batch: T.int64,
+) -> None:
+    # function attr dict
+    T.func_attr({"tir.noalias": True})
+    rxplaceholder = T.match_buffer(var_rxplaceholder, [batch, M, N], dtype="float16")
+    rxplaceholder_1 = T.match_buffer(var_rxplaceholder_1, [N], dtype="float16")
+    T_add = T.match_buffer(var_T_add, [batch, M, N], dtype="float16")
+    # body
+    # with T.block("root")
+    for i0, i1, i2 in T.grid(batch, M, N):
+        with T.block("T_add"):
+            ax0, ax1, ax2 = T.axis.remap("SSS", [i0, i1, i2])
+            T.reads(rxplaceholder[ax0, ax1, ax2], rxplaceholder_1[ax2])
+            T.writes(T_add[ax0, ax1, ax2])
+            T_add[ax0, ax1, ax2] = rxplaceholder[ax0, ax1, ax2] + rxplaceholder_1[ax2]
 
 
 @T.prim_func
@@ -305,6 +352,68 @@ def bias_add_nhwc_fp16(
 
 
 @T.prim_func
+def bias_add_nhwc_fp16_2(
+    A_handle: T.handle,
+    B_handle: T.handle,
+    out_handle: T.handle,
+    N: T.int64,
+    H: T.int64,
+    W: T.int64,
+    C: T.int64,
+):
+    A = T.match_buffer(A_handle, [N, H, W, C], dtype="float16")
+    B = T.match_buffer(B_handle, [1, 1, 1, C], dtype="float16")
+    out = T.match_buffer(out_handle, [N, H, W, C], dtype="float16")
+    for ax0, ax1, ax2, ax3 in T.grid(N, H, W, C):
+        with T.block("T_add"):
+            v_ax0, v_ax1, v_ax2, v_ax3 = T.axis.remap("SSSS", [ax0, ax1, ax2, ax3])
+            T.reads(A[v_ax0, v_ax1, v_ax2, v_ax3], B[T.int64(0), T.int64(0), T.int64(0), v_ax3])
+            T.writes(out[v_ax0, v_ax1, v_ax2, v_ax3])
+            out[v_ax0, v_ax1, v_ax2, v_ax3] = (
+                A[v_ax0, v_ax1, v_ax2, v_ax3] + B[T.int64(0), T.int64(0), T.int64(0), v_ax3]
+            )
+
+
+@T.prim_func
+def elem_add_2d_fp16(
+    in0_handle: T.handle,
+    in1_handle: T.handle,
+    out_handle: T.handle,
+    N: T.int64,
+    M: T.int64,
+):
+    in0 = T.match_buffer(in0_handle, [N, M], dtype="float16")
+    in1 = T.match_buffer(in1_handle, [N, M], dtype="float16")
+    out = T.match_buffer(out_handle, [N, M], dtype="float16")
+    for ax0, ax1 in T.grid(N, M):
+        with T.block("T_add"):
+            v_ax0, v_ax1 = T.axis.remap("SS", [ax0, ax1])
+            T.reads(in0[v_ax0, v_ax1], in1[v_ax0, v_ax1])
+            T.writes(out[v_ax0, v_ax1])
+            out[v_ax0, v_ax1] = in0[v_ax0, v_ax1] + in1[v_ax0, v_ax1]
+
+
+@T.prim_func
+def elem_add_3d_fp16(
+    in0_handle: T.handle,
+    in1_handle: T.handle,
+    out_handle: T.handle,
+    B: T.int64,
+    N: T.int64,
+    M: T.int64,
+):
+    in0 = T.match_buffer(in0_handle, [B, N, M], dtype="float16")
+    in1 = T.match_buffer(in1_handle, [B, N, M], dtype="float16")
+    out = T.match_buffer(out_handle, [B, N, M], dtype="float16")
+    for ax0, ax1, ax2 in T.grid(B, N, M):
+        with T.block("T_add"):
+            v_ax0, v_ax1, v_ax2 = T.axis.remap("SSS", [ax0, ax1, ax2])
+            T.reads(in0[v_ax0, v_ax1, v_ax2], in1[v_ax0, v_ax1, v_ax2])
+            T.writes(out[v_ax0, v_ax1, v_ax2])
+            out[v_ax0, v_ax1, v_ax2] = in0[v_ax0, v_ax1, v_ax2] + in1[v_ax0, v_ax1, v_ax2]
+
+
+@T.prim_func
 def elem_add_4d_fp16(
     A_handle: T.handle,
     B_handle: T.handle,
@@ -332,7 +441,9 @@ def get_cutlass_pattern() -> List[tvm.tir.PrimFunc]:
     return [
         dense_row_row_row_fp16,
         bias_row_fp16,
+        bias_row_fp16_2,
         batch_bias_row_fp16,
+        batch_bias_row_fp16_2,
         relu_fp16,
         batch_dense_row_row_row_fp16,
         batch_dense_2_row_row_row_fp16,
@@ -340,5 +451,8 @@ def get_cutlass_pattern() -> List[tvm.tir.PrimFunc]:
         padding_2d_nhwc_fp16,
         conv2d_nhwc_fp16,
         bias_add_nhwc_fp16,
+        bias_add_nhwc_fp16_2,
+        elem_add_2d_fp16,
+        elem_add_3d_fp16,
         elem_add_4d_fp16,
     ]
