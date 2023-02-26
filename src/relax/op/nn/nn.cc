@@ -295,7 +295,8 @@ TVM_REGISTER_OP("relax.nn.layer_norm")
     .add_argument("gamma", "Tensor", "The gamma scale factor.")
     .add_argument("beta", "Tensor", "The beta offset factor.")
     .set_attr<FInferStructInfo>("FInferStructInfo", InferStructInfoLayerNorm)
-    .set_attr<FRelaxInferLayout>("FRelaxInferLayout", InferLayoutLayerNorm);
+    .set_attr<FRelaxInferLayout>("FRelaxInferLayout", InferLayoutLayerNorm)
+    .set_attr<TMixedPrecisionPolicy>("TMixedPrecisionPolicy", MixedPrecisionPolicyKind::kFollow);
 
 /* relax.nn.group_norm */
 TVM_REGISTER_NODE_TYPE(GroupNormAttrs);
