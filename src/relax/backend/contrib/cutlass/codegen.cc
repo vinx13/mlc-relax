@@ -307,8 +307,19 @@ String GetCutlassCSource(const String& pattern_name, const String& ext_func_id,
   return code_stream_.str();
 }
 
+Call GetCutlassExternCall(const String& global_symbol, const String& source, const Call& call) {
+  ExternFunc ret(global_symbol);
+  ret = WithAttrs(std::move(ret), Map<String, ObjectRef>{
+                                      {String("c_source"), String(source)},
+                                      {String("c_source_fmt"), String("cu")},
+                                  });
+  return Call(Op::Get("relax.call_tir"), {ret, Tuple(call->args)}, call->attrs,
+              {GetStructInfo(call)});
+}
+
 TVM_REGISTER_GLOBAL("relax.ext.cutlass").set_body_typed(CUTLASSCompiler);
 TVM_REGISTER_GLOBAL("relax.ext.cutlass.get_source").set_body_typed(GetCutlassCSource);
+TVM_REGISTER_GLOBAL("relax.ext.cutlass.get_extern_call").set_body_typed(GetCutlassExternCall);
 
 }  // namespace contrib
 }  // namespace relax

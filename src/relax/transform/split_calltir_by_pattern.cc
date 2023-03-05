@@ -703,7 +703,9 @@ class SplitMutator : public ExprMutator {
     static const Op& call_tir_op_ = Op::Get("relax.call_tir");
     if (call->op.same_as(call_tir_op_)) {
       // the first argument is the function to be called
-      GlobalVar gv = Downcast<GlobalVar>(call->args[0]);
+      const auto* gv_ptr = call->args[0].as<GlobalVarNode>();
+      if (gv_ptr == nullptr) return call;
+      GlobalVar gv = GetRef<GlobalVar>(gv_ptr);
       // retrieve the function from the module and split it
       tir::PrimFunc func = Downcast<tir::PrimFunc>(mod_->Lookup(gv));
       std::vector<std::vector<int>> arg_partition;

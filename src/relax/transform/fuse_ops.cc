@@ -36,9 +36,10 @@
 #include <tvm/tir/function.h>
 
 #include <optional>
+#include <unordered_map>
 
+#include "../../relay/analysis/graph_partitioner.h"
 #include "../../support/arena.h"
-#include "utils.h"
 
 namespace tvm {
 namespace relax {
@@ -572,6 +573,8 @@ class OperatorFusor : public ExprMutator {
    * \param mod The IRModule to be transformed
    * \param graph The indexed-forward graph of the input IRModule
    * \param groups The grouped result of the group partition on the input indexed-forward graph.
+   * \param lift_constant Whether or not to lift bound constants to parameters of the grouped
+   * function.
    */
   OperatorFusor(IRModule mod, const IndexedForwardGraph& graph, const std::vector<Group*>& groups,
                 bool lift_constant = true)
@@ -889,14 +892,6 @@ IRModule MakeGroupedFunctions(
   return OperatorFusor(mod, partition, lift_constants).Transform();
 }
 
-static Map<Expr, Var> GetBindingInverse(const Map<Var, Expr>& binding) {
-  Map<Expr, Var> value_to_bound_var;
-  for (const auto& [var, val] : binding) {
-    value_to_bound_var.Set(val, var);
-  }
-  return value_to_bound_var;
-}
-
 /*! \brief Create a "partitioning", a map from interior / leaf expr to its representative group,
  * based on the provided pattern. The result can be passed to OperatorFusor above to fuse operations
  * in a group and create a grouped function.
@@ -906,24 +901,35 @@ class PatternBasedPartitioner : ExprVisitor {
   using Group = GraphPartitioner::Group;
   using GroupMap = OperatorFusor::GroupMap;
   using ExprVisitor::VisitExpr_;
+  using FCheckMatch = runtime::TypedPackedFunc<bool(const Map<DFPattern, Expr>&, const Expr&)>;
 
-  static GroupMap Run(String pattern_name, DFPattern pattern, Expr expr, support::Arena* arena) {
-    PatternBasedPartitioner part(pattern_name, pattern, AnalyzeVar2Value(expr));
-    // Initialize each expr to have its own group
-    PostOrderVisit(
-        expr, [arena, &part](const Expr& e) { part.group_map_[e.get()] = arena->make<Group>(); });
+  static GroupMap Run(String pattern_name, DFPattern pattern, FCheckMatch check, Expr expr,
+                      support::Arena* arena) {
+    PatternBasedPartitioner part(pattern_name, pattern, check, arena);
     part.VisitExpr(expr);
     return part.group_map_;
   }
 
-  PatternBasedPartitioner(String pattern_name, DFPattern pattern, const Map<Var, Expr>& bindings)
-      : pat_name_(pattern_name),
-        pat_(pattern),
-        bindings_(bindings),
-        value_to_bound_var_(GetBindingInverse(bindings)) {}
+  PatternBasedPartitioner(String pattern_name, DFPattern pattern, FCheckMatch check,
+                          support::Arena* arena)
+      : pat_name_(pattern_name), pat_(pattern), check_(check), arena_(arena) {}
 
-  void VisitExpr_(const CallNode* call) override {
+  void VisitVarDef(const Var& var) final { group_map_[var.get()] = arena_->make<Group>(); }
+
+  void VisitBinding_(const VarBindingNode* binding) final {
+    bindings_.Set(binding->var, binding->value);
+    value_to_bound_var_.Set(binding->value, binding->var);
+    ExprVisitor::VisitBinding_(binding);
+  }
+
+  void VisitExpr_(const ConstantNode* op) final { group_map_[op] = arena_->make<Group>(); }
+
+  void VisitBinding_(const VarBindingNode* binding, const CallNode* call) final {
+    VisitVarDef(binding->var);
     if (auto matches_opt = ExtractMatchedExpr(pat_, GetRef<Call>(call), bindings_)) {
+      if (!check_(matches_opt.value(), GetRef<Call>(call))) {
+        return;
+      }
       // If a match is found, put all matching expressions into the same group.
       // OperatorFusor also requires that the bound variable be in the same group as the RHS value.
       // Since is_op(...) based pattern only matches against call nodes on the right hand side,
@@ -938,15 +944,12 @@ class PatternBasedPartitioner : ExprVisitor {
       //   conv1: R.Tensor((1, 64, 56, 56), dtype="float32") = R.nn.relu(lv)
 
       // parent_group corresponds to the group of "conv1" above.
-      auto parent_group = GetGroupForBoundVar(GetRef<Call>(call));
+      auto parent_group = GetGroupForBoundVar(binding->var);
       ICHECK(parent_group);
       parent_group->attrs.Set(attr::kComposite, pat_name_);
-
       for (const auto& [pat, match] : matches_opt.value()) {
-        ICHECK(group_map_.count(match.get()));
         // Put all matching call nodes into the parent group.
         if (pat->IsInstance<CallPatternNode>() && match != GetRef<Call>(call)) {
-          AddToGroup(match, parent_group);
           // Put the bound variable on the LHS into the same parent group.
           AddToGroup(value_to_bound_var_[match], parent_group);
         }
@@ -963,15 +966,15 @@ class PatternBasedPartitioner : ExprVisitor {
     }
   }
 
-  Group* GetGroupForBoundVar(Expr e) {
-    ICHECK(value_to_bound_var_.count(e));
-    auto bound_var = value_to_bound_var_[e];
+  Group* GetGroupForBoundVar(const Var& bound_var) {
     ICHECK(group_map_.count(bound_var.get()));
     return group_map_[bound_var.get()]->FindRoot();
   }
 
   String pat_name_;
   DFPattern pat_;
+  FCheckMatch check_;
+  support::Arena* arena_;
   Map<Var, Expr> bindings_;
   Map<Expr, Var> value_to_bound_var_;
   GroupMap group_map_;
@@ -999,6 +1002,9 @@ class CompositeFunctionAnnotator : public ExprMutator {
 
   Expr VisitExpr_(const CallNode* call_node) final {
     if (auto const* gvar = call_node->op.as<GlobalVarNode>()) {
+      if (auto it = gvar_map_.find(gvar); it != gvar_map_.end()) {
+        return Call(it->second, call_node->args);
+      }
       auto func = builder_->GetContextIRModule()->Lookup(GetRef<GlobalVar>(gvar));
       if (auto composite_name = func->GetAttr<String>(attr::kComposite)) {
         auto new_func = Downcast<Function>(VisitExpr(func));
@@ -1008,6 +1014,7 @@ class CompositeFunctionAnnotator : public ExprMutator {
                              {{attr::kCodegen, codegen_name}, {tvm::attr::kGlobalSymbol, gsymbol}});
         builder_->GetContextIRModule()->Remove(GetRef<GlobalVar>(gvar));
         auto new_gvar = builder_->AddFunction(new_func, gsymbol);
+        gvar_map_[gvar] = new_gvar;
         return Call(new_gvar, call_node->args);
       }
     }
@@ -1038,19 +1045,27 @@ class CompositeFunctionAnnotator : public ExprMutator {
                                               "start with a compiler name followed by period.";
     return composite_name.substr(0, delim_pos);
   }
+
+  /*! \brief A map from old global vars to their replacements. */
+  std::unordered_map<const GlobalVarNode*, GlobalVar> gvar_map_;
 };
 
 IRModule FuseOpsByPattern(const tvm::Array<String>& pattern_names,
-                          const tvm::Array<DFPattern>& patterns, IRModule mod,
-                          bool annotate_codegen) {
+                          const tvm::Array<DFPattern>& patterns,
+                          const tvm::Array<runtime::PackedFunc>& checks, IRModule mod,
+                          bool bind_constants, bool annotate_codegen) {
   support::Arena arena;
   for (size_t i = 0; i < pattern_names.size(); ++i) {
     OperatorFusor::GroupMap group_map;
     for (const auto& entry : mod->functions) {
-      auto map = PatternBasedPartitioner::Run(pattern_names[i], patterns[i], entry.second, &arena);
+      if (entry.second->IsInstance<tir::PrimFuncNode>()) {
+        continue;
+      }
+      auto map = PatternBasedPartitioner::Run(pattern_names[i], patterns[i], checks[i],
+                                              entry.second, &arena);
       group_map.insert(map.begin(), map.end());
     }
-    mod = MakeGroupedFunctions(mod, group_map, /*lift_constants*/ false);
+    mod = MakeGroupedFunctions(mod, group_map, /*lift_constants*/ !bind_constants);
   }
   if (annotate_codegen) {
     return CompositeFunctionAnnotator(mod).Run();
@@ -1076,10 +1091,13 @@ Pass FuseOps(int fuse_opt_level) {
 TVM_REGISTER_GLOBAL("relax.transform.FuseOps").set_body_typed(FuseOps);
 
 Pass FuseOpsByPattern(const tvm::Array<String>& pattern_names,
-                      const tvm::Array<DFPattern>& patterns, bool annotate_codegen) {
+                      const tvm::Array<DFPattern>& patterns,
+                      const tvm::Array<runtime::PackedFunc>& checks, bool bind_constants,
+                      bool annotate_codegen) {
   runtime::TypedPackedFunc<IRModule(IRModule, PassContext)> pass_func =  //
       [=](IRModule m, PassContext pc) {
-        return relax::FuseOpsByPattern(pattern_names, patterns, m, annotate_codegen);
+        return relax::FuseOpsByPattern(pattern_names, patterns, checks, m, bind_constants,
+                                       annotate_codegen);
       };
   return CreateModulePass(/*pass_function=*/pass_func,       //
                           /*opt_level=*/0,                   //

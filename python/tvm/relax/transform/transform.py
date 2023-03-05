@@ -323,38 +323,52 @@ def FuseOps(fuse_opt_level=-1) -> tvm.ir.transform.Pass:
 
 
 def FuseOpsByPattern(
-    patterns: List[Tuple], annotate_codegen: bool = False
+    patterns: List[Tuple], bind_constants: bool = True, annotate_codegen: bool = False
 ) -> tvm.ir.transform.Pass:
     """Apply pattern matching to each function in the given module, and group matched expressions
     into a new function.
-
     The end result is similar to FuseOps, but fusion is driven completely by the provided patterns.
-
     Parameters
     ----------
-    patterns : List[Tuple[str, DFPattern]]
+    patterns : List[Union[Tuple[str, DFPattern], Tuple[str, DFPattern, Callable]]]
+        A list of tuple of (name, pattern) or (name, pattern, predicate) to be matched.
+        The predicate is a function with type (Map<DFPattern, Expr>, Expr) -> bool. It takes a
+        match result and returns a boolean value to indicate whether the match result is accepted.
         The patterns to detect. The order of the patterns determines the order of priority in which
         they are matched. Higher-priority patterns should come earlier in the list.
         The string is the name of the corresponding pattern. It becomes the value of the kComposite
         attribute of a fused function after a successful matching.
-
+    bind_constants : bool
+        Whether or not to keep bound constants in the grouped function.
     annotate_codegen : bool
         If True, wrap each created composite function with another function, whose body consists
         only of a call to the composite function, and annotate the outer function with "Codegen"
         and "global_symbol" attributes. The "Codegen" attribute is set as the prefix of the
         corresponding pattern name. For example, "dnnl" if the pattern name is "dnnl.conv2d_relu".
-
         This must be True if the created composite functions are intended to be offloaded to
         an external backend without using the MergeCompositeFunctions pass.
-
     Returns
     -------
     ret : tvm.transform.Pass
         The registered pass for pattern-based fusion.
-
     """
-    pattern_names, df_patterns = zip(*patterns)
-    return _ffi_api.FuseOpsByPattern(pattern_names, df_patterns, annotate_codegen)  # type: ignore
+    pattern_names = []
+    df_patterns = []
+    checks = []
+    for tup in patterns:
+        if len(tup) == 2:
+            pattern_names.append(tup[0])
+            df_patterns.append(tup[1])
+            checks.append(lambda *_: True)
+        elif len(tup) == 3:
+            pattern_names.append(tup[0])
+            df_patterns.append(tup[1])
+            checks.append(tup[2])
+        else:
+            raise ValueError("Invalid pattern: {}".format(tup))
+    return _ffi_api.FuseOpsByPattern(
+        pattern_names, df_patterns, checks, bind_constants, annotate_codegen
+    )  # type: ignore
 
 
 def MergeCompositeFunctions() -> tvm.ir.transform.Pass:

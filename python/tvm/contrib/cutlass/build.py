@@ -53,6 +53,7 @@ def _get_cutlass_compile_options(sm, threads, use_fast_math=False):
     cutlass_root = _get_cutlass_path()
     cutlass_include = os.path.join(cutlass_root, "include")
     cutlass_util_include = os.path.join(cutlass_root, "tools/util/include")
+    cutlass_attention_include = os.path.join(cutlass_root, "examples/41_fused_multi_head_attention")
 
     kwargs = {}
     kwargs["cc"] = "nvcc"
@@ -67,6 +68,7 @@ def _get_cutlass_compile_options(sm, threads, use_fast_math=False):
         "-std=c++17",
         "-I" + cutlass_include,
         "-I" + cutlass_util_include,
+        "-I" + cutlass_attention_include,
     ]
     if use_fast_math:
         kwargs["options"].append("-DCUTLASS_USE_TANH_FOR_SIGMOID")
