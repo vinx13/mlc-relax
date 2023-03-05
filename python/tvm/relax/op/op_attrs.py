@@ -142,3 +142,8 @@ class Resize2DAttrs(Attrs):
 @tvm._ffi.register_object("relax.attrs.MatmulAttrs")
 class MatmulAttrs(Attrs):
     """Attributes for matmul operator"""
+
+
+@tvm._ffi.register_object("relax.attrs.ArgmaxArgminAttrs")
+class ArgmaxArgminAttrs(Attrs):
+    """Attributes for argmax/argmin operator"""
