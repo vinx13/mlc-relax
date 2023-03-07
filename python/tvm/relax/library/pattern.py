@@ -114,9 +114,9 @@ def batch_bias_row_fp16(
     var_rxplaceholder: T.handle,
     var_rxplaceholder_1: T.handle,
     var_T_add: T.handle,
+    batch: T.int64,
     M: T.int64,
     N: T.int64,
-    batch: T.int64,
 ) -> None:
     # function attr dict
     T.func_attr({"tir.noalias": True})
@@ -138,9 +138,9 @@ def batch_bias_row_fp16_2(
     var_rxplaceholder: T.handle,
     var_rxplaceholder_1: T.handle,
     var_T_add: T.handle,
+    batch: T.int64,
     M: T.int64,
     N: T.int64,
-    batch: T.int64,
 ) -> None:
     # function attr dict
     T.func_attr({"tir.noalias": True})
@@ -178,10 +178,10 @@ def batch_dense_row_row_row_fp16(
     var_rxplaceholder: T.handle,
     var_rxplaceholder_1: T.handle,
     var_matmul: T.handle,
+    batch: T.int64,
     M: T.int64,
     N: T.int64,
     K: T.int64,
-    batch: T.int64,
 ) -> None:
     # function attr dict
     T.func_attr({"tir.noalias": True})
@@ -207,10 +207,10 @@ def batch_dense_2_row_row_row_fp16(
     var_rxplaceholder: T.handle,
     var_rxplaceholder_1: T.handle,
     var_matmul: T.handle,
+    batch: T.int64,
     M: T.int64,
     N: T.int64,
     K: T.int64,
-    batch: T.int64,
 ) -> None:
     # function attr dict
     T.func_attr({"tir.noalias": True})
@@ -436,6 +436,82 @@ def elem_add_4d_fp16(
             )
 
 
+@T.prim_func
+def scalar_mul_3d_fp16(
+    inp0_handle: T.handle,
+    out_handle: T.handle,
+    D1: T.int64,
+    D2: T.int64,
+    D3: T.int64,
+    scalar: T.float16,
+):
+    inp0 = T.match_buffer(inp0_handle, [D1, D2, D3], dtype="float16")
+    out = T.match_buffer(out_handle, [D1, D2, D3], dtype="float16")
+    for ax0, ax1, ax2 in T.grid(D1, D2, D3):
+        with T.block("T_mul"):
+            v_ax0, v_ax1, v_ax2 = T.axis.remap("SSS", [ax0, ax1, ax2])
+            T.reads(inp0[v_ax0, v_ax1, v_ax2])
+            T.writes(out[v_ax0, v_ax1, v_ax2])
+            out[v_ax0, v_ax1, v_ax2] = inp0[v_ax0, v_ax1, v_ax2] * scalar
+
+
+@T.prim_func
+def erf_3d_fp16(
+    inp0_handle: T.handle,
+    out_handle: T.handle,
+    D1: T.int64,
+    D2: T.int64,
+    D3: T.int64,
+):
+    inp0 = T.match_buffer(inp0_handle, [D1, D2, D3], dtype="float16")
+    out = T.match_buffer(out_handle, [D1, D2, D3], dtype="float16")
+    for ax0, ax1, ax2 in T.grid(D1, D2, D3):
+        with T.block("T_erf"):
+            v_ax0, v_ax1, v_ax2 = T.axis.remap("SSS", [ax0, ax1, ax2])
+            T.reads(inp0[v_ax0, v_ax1, v_ax2])
+            T.writes(out[v_ax0, v_ax1, v_ax2])
+            out[v_ax0, v_ax1, v_ax2] = T.erf(inp0[v_ax0, v_ax1, v_ax2])
+
+
+@T.prim_func
+def scalar_add_3d_fp16(
+    inp0_handle: T.handle,
+    out_handle: T.handle,
+    D1: T.int64,
+    D2: T.int64,
+    D3: T.int64,
+    scalar: T.float16,
+):
+    inp0 = T.match_buffer(inp0_handle, [D1, D2, D3], dtype="float16")
+    out = T.match_buffer(out_handle, [D1, D2, D3], dtype="float16")
+    for ax0, ax1, ax2 in T.grid(D1, D2, D3):
+        with T.block("T_add"):
+            v_ax0, v_ax1, v_ax2 = T.axis.remap("SSS", [ax0, ax1, ax2])
+            T.reads(inp0[v_ax0, v_ax1, v_ax2])
+            T.writes(out[v_ax0, v_ax1, v_ax2])
+            out[v_ax0, v_ax1, v_ax2] = scalar + inp0[v_ax0, v_ax1, v_ax2]
+
+
+@T.prim_func
+def elem_mul_3d_fp16(
+    inp0_handle: T.handle,
+    inp1_handle: T.handle,
+    out_handle: T.handle,
+    D1: T.int64,
+    D2: T.int64,
+    D3: T.int64,
+):
+    inp0 = T.match_buffer(inp0_handle, [D1, D2, D3], dtype="float16")
+    inp1 = T.match_buffer(inp1_handle, [D1, D2, D3], dtype="float16")
+    out = T.match_buffer(out_handle, [D1, D2, D3], dtype="float16")
+    for ax0, ax1, ax2 in T.grid(D1, D2, D3):
+        with T.block("T_mul"):
+            v_ax0, v_ax1, v_ax2 = T.axis.remap("SSS", [ax0, ax1, ax2])
+            T.reads(inp0[v_ax0, v_ax1, v_ax2], inp1[v_ax0, v_ax1, v_ax2])
+            T.writes(out[v_ax0, v_ax1, v_ax2])
+            out[v_ax0, v_ax1, v_ax2] = inp0[v_ax0, v_ax1, v_ax2] * inp1[v_ax0, v_ax1, v_ax2]
+
+
 def get_cutlass_pattern() -> List[tvm.tir.PrimFunc]:
     """Get the patterns for cutlass dispatch."""
     return [
@@ -445,6 +521,7 @@ def get_cutlass_pattern() -> List[tvm.tir.PrimFunc]:
         batch_bias_row_fp16,
         batch_bias_row_fp16_2,
         relu_fp16,
+        erf_3d_fp16,
         batch_dense_row_row_row_fp16,
         batch_dense_2_row_row_row_fp16,
         copy_4d_nhwc_fp16,
@@ -455,4 +532,7 @@ def get_cutlass_pattern() -> List[tvm.tir.PrimFunc]:
         elem_add_2d_fp16,
         elem_add_3d_fp16,
         elem_add_4d_fp16,
+        elem_mul_3d_fp16,
+        scalar_add_3d_fp16,
+        scalar_mul_3d_fp16,
     ]

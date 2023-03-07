@@ -172,6 +172,17 @@ class EmitGemmInstance:
       ${element_epilogue},
       cutlass::epilogue::thread::ScaleType::NoBetaScaling
     >"""
+        self.epilogue_residual = """
+    cutlass::epilogue::thread::LinearCombinationResidualBlock<
+        ${element_c},
+        ${element_accumulator},
+        ${element_accumulator},
+        ${element_c},
+        ${epilogue_vector_length},
+        ${unary_op1},
+        ${binary_op1},
+        ${unary_op2}
+    >"""
         self.gemm_template = """
   // Gemm operator ${operation_name}
   using Operation_${operation_name} = cutlass::gemm::device::${kernel_name}<
@@ -194,7 +205,9 @@ class EmitGemmInstance:
   >;
 """
 
-    def emit(self, operation, no_beta_scaling=False, batched=False):
+    def emit(
+        self, operation, no_beta_scaling=False, batched=False, is_residual=False, residual=None
+    ):
         """Instantiate a GEMM kernel from given `operation`."""
         warp_shape = [
             operation.tile_description.threadblock_shape[idx]
@@ -245,15 +258,29 @@ class EmitGemmInstance:
             ],
         }
 
-        values["kernel_name"] = "GemmBatched" if batched else "Gemm"
         values["split_k_serial"] = "" if batched else "false,"
+        if is_residual:
+            values["kernel_name"] = "GemmUniversalWithBroadcast"
+            if residual == "mul":
+                values["unary_op1"] = "cutlass::epilogue::thread::Identity"
+                values["binary_op1"] = "cutlass::multiplies"
+                values["unary_op2"] = "cutlass::epilogue::thread::Identity"
+            else:
+                raise ValueError("Unknown residual type: %s" % residual)
 
-        gemm_template = substitute_template(
-            self.gemm_template,
-            {
-                "epilogue": self.epilogue_no_beta_scaling
-                if no_beta_scaling
-                else self.epilogue_default
-            },
-        )
+            gemm_template = substitute_template(
+                self.gemm_template,
+                {"epilogue": self.epilogue_residual},
+            )
+        else:
+            values["kernel_name"] = "GemmBatched" if batched else "Gemm"
+
+            gemm_template = substitute_template(
+                self.gemm_template,
+                {
+                    "epilogue": self.epilogue_no_beta_scaling
+                    if no_beta_scaling
+                    else self.epilogue_default
+                },
+            )
         return substitute_template(gemm_template, values)

@@ -892,7 +892,10 @@ PackedFunc WrapTimeEvaluator(PackedFunc pf, Device dev, int number, int repeat, 
           number = static_cast<int>(
               std::max((min_repeat_ms / (duration_ms / number) + 1), number * golden_ratio));
         }
-
+        LOG(INFO) << "repeat=" << i << " number=" << number << " min_repeat_ms=" << min_repeat_ms
+                  << " limit_zero_time_iterations=" << limit_zero_time_iterations
+                  << " cooldown_interval_ms=" << cooldown_interval_ms
+                  << " repeats_to_cooldown=" << repeats_to_cooldown;
         // start timing
         Timer t = Timer::Start(dev);
         for (int j = 0; j < number; ++j) {

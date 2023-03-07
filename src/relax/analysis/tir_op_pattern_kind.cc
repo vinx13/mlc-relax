@@ -378,6 +378,10 @@ bool HasReshapePattern(const PrimFunc& func) {
         return;
       }
 
+      for (const IterVar& v : block->iter_vars) {
+        ana_.Bind(v->var, Range::FromMinExtent(v->dom->min, v->dom->extent));
+      }
+
       // Step 1. Get the load/store pattern of the block body.
       // To detect the reshape pattern, we require the block body to be a
       // BufferStore, which has a BufferLoad as value.
@@ -411,8 +415,9 @@ bool HasReshapePattern(const PrimFunc& func) {
 
       // Step 4. Substitute the block iterators in the flattened index
       // with loop variables, and check if we can prove their equality.
-      src_idx = tir::Substitute(std::move(src_idx), var_map_);
-      dst_idx = tir::Substitute(std::move(dst_idx), var_map_);
+      // src_idx = tir::Substitute(std::move(src_idx), var_map_);
+      // dst_idx = tir::Substitute(std::move(dst_idx), var_map_);
+
       if (ana_.CanProveEqual(src_idx, dst_idx)) {
         this->is_reshape_ = true;
       }

@@ -24,7 +24,8 @@ from typing import Optional
 
 import tvm
 from tvm.relax.vm import build as relax_build
-from tvm.relax.frontend.torch.fx_translator import from_fx
+
+from .fx_translator import from_fx
 
 
 def device_from_inputs(example_inputs):
@@ -57,7 +58,7 @@ def relax_dynamo(pipeline: Optional[tvm.transform.Pass] = None):
             """A helper function to transfer a NDArray to torch.tensor."""
             if isinstance(nd_tensor, tvm.nd.NDArray):
                 return torch.from_numpy(nd_tensor.numpy())
-            elif isinstance(nd_tensor, tvm.runtime.container.ADT):
+            elif isinstance(nd_tensor, tvm.ir.Array):
                 return tuple(to_torch_tensor(x) for x in nd_tensor)
             else:
                 raise ValueError(f"Unsupported type {type(nd_tensor)}")
@@ -96,7 +97,7 @@ def relax_dynamo(pipeline: Optional[tvm.transform.Pass] = None):
 
         ex = relax_build(mod, target=target)
 
-        vm = tvm.relax.vm.VirtualMachine(exec=ex.mod, device=dev)
+        vm = tvm.relax.VirtualMachine(ex.mod, device=dev)
 
         def exec_tvm(*i_args):
             args = [a.contiguous() for a in i_args]
@@ -114,7 +115,7 @@ def relax_dynamo(pipeline: Optional[tvm.transform.Pass] = None):
     return _relax_backend
 
 
-def dynamo_capture_subgraphs(model, *params) -> tvm.ir.IRModule:
+def dynamo_capture_subgraphs(model, *params, **kwargs) -> tvm.IRModule:
     """Capture subgraphs of the PyTorch model using torch.compile into an IRModule.
 
     Parameters
@@ -125,22 +126,35 @@ def dynamo_capture_subgraphs(model, *params) -> tvm.ir.IRModule:
     params : List[torch.Tensor]
         The parameters of the PyTorch model.
 
+    keep_params_as_input : bool
+        Whether to keep model parameters as input variables of the captured Relax functions.
+
     Returns
     -------
-    mod : tvm.ir.IRModule
-        The IRModule that contains captured subgraphs.
+    output : ImporterOutput
+        The output of translation, including the translated IRModule.
+        If `keep_params_as_input` is true, the functions in the IRModule have an
+        attribute "params" that contains the weights of the input model. The
+        weights can be detached by `relax.frontend.detach_params`.
     """
     import torch  # type: ignore[import]
     from torch import fx  # type: ignore[import]
     from torch import _dynamo as dynamo  # type: ignore[import]
+
+    keep_params_as_input = "keep_params_as_input" in kwargs and kwargs["keep_params_as_input"]
 
     mod = tvm.IRModule()
 
     def _capture(graph_module: fx.GraphModule, example_inputs):
         assert isinstance(graph_module, torch.fx.GraphModule)
         input_info = [(tuple(tensor.shape), str(tensor.dtype)) for tensor in example_inputs]
-        subgraph = from_fx(graph_module, input_info)
-        mod["subgraph_" + str(len(mod.get_global_vars()))] = subgraph["main"]
+        mod_ = from_fx(
+            graph_module,
+            input_info,
+            keep_params_as_input=keep_params_as_input,
+            unwrap_unit_return_tuple=True,
+        )
+        mod[f"subgraph_{len(mod.get_global_vars())}"] = mod_["main"]
         return graph_module.forward
 
     dynamo.reset()

@@ -67,6 +67,13 @@ def create_gemm_operator_with_epilogue(
 
     epilogue, no_beta_scaling = EPILOGUE_MAP[op_type]
 
+    if epilogue == EpilogueFunctor.LinearCombinationResidualBlock:
+        is_residual = True
+        residual = op_type.split("residual_")[1]
+    else:
+        is_residual = False
+        residual = None
+
     op = GemmOperation(
         tile_description.minimum_compute_capability,
         tile_description,
@@ -80,7 +87,13 @@ def create_gemm_operator_with_epilogue(
 
     return (
         op.procedural_name(),
-        EmitGemmInstance().emit(op, no_beta_scaling=no_beta_scaling, batched=batched),
+        EmitGemmInstance().emit(
+            op,
+            no_beta_scaling=no_beta_scaling,
+            batched=batched,
+            is_residual=is_residual,
+            residual=residual,
+        ),
     )
 
 

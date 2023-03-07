@@ -242,6 +242,10 @@ def _linux_compile(output, objects, options, compile_cmd, compile_shared=False):
         cmd += ["-Xcompiler=-fPIC"]
         cmd += ["-Xcompiler=-fno-strict-aliasing"]
         cmd += ["-t 24"]
+        cmd += ["-DCUTLASS_ENABLE_TENSOR_CORE_MMA=1"]
+        cmd += ["-Xcompiler=-Wconversion"]
+        cmd += ["--use_fast_math"]
+        cmd += ["-DNDEBUG"]
     cmd += ["-o", output]
     if isinstance(objects, str):
         cmd += [objects]

@@ -34,6 +34,7 @@ from .pattern import (
     batch_bias_row_fp16,
     batch_bias_row_fp16_2,
     relu_fp16,
+    erf_3d_fp16,
     batch_dense_row_row_row_fp16,
     batch_dense_2_row_row_row_fp16,
     conv2d_nhwc_fp16,
@@ -44,6 +45,9 @@ from .pattern import (
     elem_add_2d_fp16,
     elem_add_3d_fp16,
     elem_add_4d_fp16,
+    elem_mul_3d_fp16,
+    scalar_add_3d_fp16,
+    scalar_mul_3d_fp16,
 )
 
 # list representing the anchor ops
@@ -131,14 +135,84 @@ def dense(match_results, attr, get_code=True):
     return None
 
 
+def bacth_dense_bias_gelu(match_results, attr, get_code=True):
+    if len(match_results) < 7:
+        return None
+    attr = batch_dense_bias(match_results[:2], attr, get_code=False)  # batch_dense, batch_bias
+    if (
+        attr is None
+        or match_results[2].pattern != scalar_mul_3d_fp16
+        or match_results[3].pattern != erf_3d_fp16
+        or match_results[4].pattern != scalar_mul_3d_fp16
+        or match_results[5].pattern != scalar_add_3d_fp16
+        or match_results[6].pattern != elem_mul_3d_fp16
+    ):
+        return None
+
+    def shape_match_3d(shape1, shape2):
+        if len(shape1) < 3 or len(shape2) < 3:
+            return False
+        return shape1[0] == shape2[0] and shape1[1] == shape2[1] and shape1[2] == shape2[2]
+
+    for i in range(1, 6):
+        if not shape_match_3d(match_results[i].symbol_values, match_results[i + 1].symbol_values):
+            return None
+
+    if not (
+        match_results[1].matched_buffers[2] == match_results[2].matched_buffers[0]
+        and match_results[2].matched_buffers[1] == match_results[3].matched_buffers[0]
+        and match_results[3].matched_buffers[1] == match_results[4].matched_buffers[0]
+        and match_results[4].matched_buffers[1] == match_results[5].matched_buffers[0]
+        and match_results[5].matched_buffers[1] == match_results[6].matched_buffers[1]
+        and match_results[1].matched_buffers[2] == match_results[6].matched_buffers[0]
+    ):
+        return None
+
+    attr["op_type"] = "cutlass.batch_matmul_bias_gelu_fp16"
+    return [_get_graph_pattern_cutlass_code(attr=attr), 7] if get_code else attr
+
+
+def batch_dense_bias_residual_mul(match_results, attr, get_code=True):
+    if len(match_results) < 3:
+        return None
+    attr = batch_dense_bias(match_results[:2], attr, get_code=False)  # batch_dense, batch_bias
+    if attr is None or match_results[2].pattern != elem_mul_3d_fp16:
+        return None
+    (
+        b_bias,
+        m_bias,
+        n_bias,
+    ) = match_results[1].symbol_values
+    (
+        b_mul,
+        m_mul,
+        n_mul,
+    ) = match_results[2].symbol_values
+    A_bias, B_bias, C_bias = match_results[1].matched_buffers
+    A_mul, B_mul, C_mul = match_results[2].matched_buffers
+    if b_bias == b_mul and m_bias == m_mul and n_bias == n_mul and C_bias == A_mul:
+        attr["op_type"] = "cutlass.batch_matmul_bias_residual_mul"
+        return [_get_graph_pattern_cutlass_code(attr=attr), 3] if get_code else attr
+    return None
+
+
 def batch_dense_bias(match_results, attr, get_code=True):
     if len(match_results) < 2:
         return None
     attr = batch_dense(match_results[:1], attr, get_code=False)
     if attr is None or match_results[1].pattern not in BATCH_DENSE_BIAS_LIST:
         return None
-    m_dense, n_dense, k_dense, b_dense = match_results[0].symbol_values
-    m_bias, n_bias, b_bias = match_results[1].symbol_values
+    (
+        b_dense,
+        m_dense,
+        n_dense,
+        k_dense,
+    ) = match_results[0].symbol_values
+    (
+        b_bias,
+        m_bias,
+        n_bias,
+    ) = match_results[1].symbol_values
     A_dense, B_dense, C_dense = match_results[0].matched_buffers
     A_bias, B_bias, C_bias = match_results[1].matched_buffers
     if b_dense == b_bias and m_dense == m_bias and n_dense == n_bias and C_dense == A_bias:
@@ -318,9 +392,12 @@ def cutlass_fcodegen(sm=80, bin_dir="./bin"):
         attr["conv2d_profiler"] = conv2d_profiler
 
         cutlass_patterns = [
+            # 7
+            bacth_dense_bias_gelu,
             # 4
             conv2d_bias_residual_add,
             # 3
+            batch_dense_bias_residual_mul,
             dense_bias_relu,
             conv2d_bias,
             # 2
@@ -599,7 +676,139 @@ def cutlass_codegen_batch_gemm(
     layouta, layoutb, layoutc = _convert_layout_str([layouta, layoutb, layoutc])
     r_layouta, r_layoutb, r_layoutc = _reverse_layout([layouta, layoutb, layoutc])
 
-    if op_type in ["cutlass.batch_matmul_bias", "cutlass.batch_matmul_bias_relu"]:
+    # Handle residual case
+    if op_type in [
+        "cutlass.batch_matmul_bias_residual_mul",
+    ]:
+        text = f"""
+#define CUTLASS_ENABLE_CUBLAS 1
+#define CUTLASS_NAMESPACE cutlass
+#define CUTLASS_ENABLE_TENSOR_CORE_MMA 1
+#define NDEBUG
+
+#include <cutlass/cutlass.h>
+#include <cutlass/tensor_ref.h>
+#include <cutlass/util/host_tensor.h>
+#include <cutlass/gemm/device/gemm.h>
+#include <cutlass/gemm/device/gemm_batched.h>
+#include <cutlass/layout/matrix.h>
+#include <cutlass/numeric_types.h>
+#include "cutlass/epilogue/thread/activation.h"
+#include "cutlass/epilogue/thread/linear_combination_residual_block.h"
+#include "cutlass/gemm/device/gemm_universal_with_broadcast.h"
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <vector>
+
+#define DMLC_USE_LOGGING_LIBRARY <tvm/runtime/logging.h>
+
+#include <tvm/runtime/logging.h>
+#include <tvm/runtime/ndarray.h>
+#include <tvm/runtime/packed_func.h>
+
+namespace {{
+
+using namespace tvm;
+using namespace tvm::runtime;
+
+void _BHGEMM(NDArray A, NDArray B, NDArray Bias, NDArray D, NDArray C) {{
+    // A: [Batch, M, K], B: [1, K, N]/[K, N], Bias: [1, N]/[N], D: [Batch, M, N], C: [Batch, M, N]
+    CHECK_EQ(A->ndim, 3);
+    int bdim = B->ndim;
+    int bias_dim = Bias->ndim;
+    CHECK_EQ(C->ndim, 3);
+    CHECK_EQ(A->shape[2], B->shape[bdim - 2]);
+    CHECK_EQ(Bias->shape[bias_dim - 1], B->shape[bdim - 1]);
+    CHECK_EQ(D->ndim, 3);
+    CHECK_EQ(D->shape[0], A->shape[0]);
+    CHECK_EQ(D->shape[1], A->shape[1]);
+    CHECK_EQ(D->shape[2], B->shape[bdim - 1]);
+    CHECK_EQ(C->shape[0], A->shape[0]);
+    CHECK_EQ(C->shape[1], A->shape[1]);
+    CHECK_EQ(C->shape[2], B->shape[bdim - 1]);
+
+    int64_t M = A->shape[0] * A->shape[1];
+    int64_t N = B->shape[bdim - 1];
+    int64_t K = A->shape[2];
+    int64_t input_a_batch_stride = M * K;
+    int64_t input_a_stride = K;
+    int64_t input_a_offset = 0; // default to 0
+    int64_t input_b_batch_stride = K * N;
+    int64_t input_b_stride = N;
+    int64_t input_b_offset = 0; // default to 0
+
+    int64_t output_stride = N;
+    int64_t output_offset = 0;
+
+    int64_t a_size = 1;
+    a_size *= A->shape[0];
+    a_size *= A->shape[1];
+    a_size *= A->shape[2];
+    
+    int64_t b_size = 1;
+    b_size *= B->shape[bias_dim - 2];
+    b_size *= B->shape[bias_dim - 1];
+    
+    int64_t c_size = 1;
+    c_size *= C->shape[0];
+    c_size *= C->shape[1];
+    c_size *= C->shape[2];
+    
+    // Define the GEMM operation
+    {cutlass_op_def}
+    using ElementComputeEpilogue = typename {op_name}::ElementAccumulator;
+    typename {op_name}::Arguments arguments({{
+        cutlass::gemm::GemmUniversalMode::kGemm, // GemmUniversalMode mode
+        {{M, N, K}}, // GemmCoord problem_size
+        1, // int batch_count
+        {{ElementComputeEpilogue(1), ElementComputeEpilogue(1)}}, // typename EpilogueOutputOp::Params epilogue
+        ({typea}*)(A->data) + input_a_offset, // void const * ptr_A
+        ({typeb}*)(B->data) + input_b_offset, // void const * ptr_B
+        ({typec}*)(D->data), // void const * ptr_C1
+
+        ({typec}*)(C->data) + output_offset, // void * ptr_D
+        ({typea}*)(Bias->data), // void * ptr_Vector
+        nullptr, // void * ptr_Tensor
+        input_a_batch_stride, // int64_t batch_stride_A
+        input_b_batch_stride, // int64_t batch_stride_B
+        0, // int64_t batch_stride_C1
+
+        0, // int64_t batch_stride_D
+        0, // int64_t batch_stride_Vector
+        0, // int64_t batch_stride_Tensor
+        input_a_stride, // typename LayoutA::Stride::Index lda
+        input_b_stride, // typename LayoutB::Stride::Index ldb
+        N, // typename LayoutC::Stride::Index ldc1
+
+        output_stride, // typename LayoutC::Stride::Index ldd
+        0, // typename LayoutC::Stride::Index ldr
+        0, // typename LayoutC::Stride::Index ldt
+    }});
+    {op_name} gemm_op;
+    size_t workspace_size = gemm_op.get_workspace_size(arguments);
+    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    CHECK(status == cutlass::Status::kSuccess);
+
+    status = gemm_op.initialize(arguments, workspace.get());
+    CHECK(status == cutlass::Status::kSuccess);
+
+    status = gemm_op();
+    CHECK(status == cutlass::Status::kSuccess);
+    return;
+}}
+
+}}  // namespace
+TVM_DLL_EXPORT_TYPED_FUNC({{global_symbol}}, _BHGEMM);
+      """
+        return text
+
+    if op_type in [
+        "cutlass.batch_matmul_bias",
+        "cutlass.batch_matmul_bias_relu",
+        "cutlass.batch_matmul_bias_gelu_fp16",
+    ]:
         bias_param = "NDArray Bias, "
         bias_var_def = f"""
         {r_layoutc}::Stride::Index ld_bias(0);
@@ -624,7 +833,8 @@ def cutlass_codegen_batch_gemm(
       #include <cutlass/gemm/device/gemm_batched.h>
       #include <cutlass/layout/matrix.h>
       #include <cutlass/numeric_types.h>
-
+	  #include "cutlass/epilogue/thread/activation.h"
+	  #include "cutlass/epilogue/thread/linear_combination_generic.h"
       #include <fstream>
       #include <iostream>
       #include <sstream>
@@ -635,7 +845,7 @@ def cutlass_codegen_batch_gemm(
       #include <tvm/runtime/logging.h>
       #include <tvm/runtime/ndarray.h>
       #include <tvm/runtime/packed_func.h>
-
+      
       namespace {{
 
       using namespace tvm;

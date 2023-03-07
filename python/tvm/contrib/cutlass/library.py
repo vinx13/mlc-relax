@@ -171,6 +171,7 @@ class EpilogueFunctor(enum.Enum):
     LinearCombinationRelu = enum_auto()
     LinearCombinationBias = enum_auto()
     LinearCombinationGelu = enum_auto()
+    LinearCombinationFastGelu = enum_auto()
     LinearCombinationSigmoid = enum_auto()
     LinearCombinationSilu = enum_auto()
     LinearCombinationHardSwish = enum_auto()
