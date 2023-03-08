@@ -76,7 +76,9 @@ class TorchFXImporter:
         elif input_type in ["int32", "torch.int32", torch.int32]:
             return "int32"
         else:
-            raise NotImplementedError("input_type {} is not handled yet".format(input_type))
+            raise NotImplementedError(
+                "input_type {} is not handled yet".format(input_type)
+            )
 
     @staticmethod
     def _convert_torch_tensor_to_relax(tensor: torch.Tensor) -> relax.Var:
@@ -110,7 +112,9 @@ class TorchFXImporter:
         elif isinstance(node, list):
             return [self._retrieve_args(x) for x in node]
         elif isinstance(node, dict):
-            return {self._retrieve_args(k): self._retrieve_args(v) for k, v in node.items()}
+            return {
+                self._retrieve_args(k): self._retrieve_args(v) for k, v in node.items()
+            }
         else:
             return node
 
@@ -248,7 +252,9 @@ class TorchFXImporter:
             start_end_step[2] = 1
 
         if "dtype" in node.kwargs:
-            dtype = TorchFXImporter._convert_data_type(str(node.kwargs["dtype"]), self.env)
+            dtype = TorchFXImporter._convert_data_type(
+                str(node.kwargs["dtype"]), self.env
+            )
         elif any([isinstance(x, float) for x in start_end_step]):
             dtype = TorchFXImporter._convert_data_type(torch.get_default_dtype())
         else:
@@ -264,8 +270,12 @@ class TorchFXImporter:
         args = self.retrieve_args(node)
         x = args[0]
         dtype = x.struct_info.dtype
-        value = args[1] if isinstance(args[1], relax.Expr) else relax.const(args[1], dtype)
-        filled = self.block_builder.emit(relax.op.full(x.struct_info.shape, value, dtype))
+        value = (
+            args[1] if isinstance(args[1], relax.Expr) else relax.const(args[1], dtype)
+        )
+        filled = self.block_builder.emit(
+            relax.op.full(x.struct_info.shape, value, dtype)
+        )
         self.env[node.args[0]] = filled
         return filled
 
@@ -328,10 +338,14 @@ class TorchFXImporter:
     ########## DataType ##########
 
     def _float(self, node: fx.node.Node) -> relax.Var:
-        return self.block_builder.emit(relax.op.astype(self.env[node.args[0]], "float32"))
+        return self.block_builder.emit(
+            relax.op.astype(self.env[node.args[0]], "float32")
+        )
 
     def _half(self, node: fx.node.Node) -> relax.Var:
-        return self.block_builder.emit(relax.op.astype(self.env[node.args[0]], "float16"))
+        return self.block_builder.emit(
+            relax.op.astype(self.env[node.args[0]], "float16")
+        )
 
     def _type(self, node: fx.node.Node) -> relax.Var:
         x = self.env[node.args[0]]
@@ -341,7 +355,9 @@ class TorchFXImporter:
     ########## Linear Algebra ##########
 
     def _matmul_impl(self, a: relax.Expr, b: relax.Expr):
-        return self.block_builder.emit(relax.op.linear_algebra.matmul(a, b, out_dtype="float32"))
+        return self.block_builder.emit(
+            relax.op.linear_algebra.matmul(a, b, out_dtype="float32")
+        )
 
     def _matmul(self, node: fx.node.Node) -> relax.Var:
         args = self.retrieve_args(node)
@@ -355,7 +371,9 @@ class TorchFXImporter:
         x = self.env[node.args[0]]
         y = self.env[node.args[1]]
         z = self.env[node.args[2]]
-        matmul = self.block_builder.emit(relax.op.linear_algebra.matmul(y, z, out_dtype="float32"))
+        matmul = self.block_builder.emit(
+            relax.op.linear_algebra.matmul(y, z, out_dtype="float32")
+        )
         return self.block_builder.emit(relax.op.add(x, matmul))
 
     def _baddbmm(self, node: fx.node.Node) -> relax.Var:
@@ -370,21 +388,31 @@ class TorchFXImporter:
             res = self.block_builder.emit(relax.op.matmul(a, b))
             if alpha != 1:
                 dtype = res.struct_info.dtype
-                res = self.block_builder.emit(relax.op.multiply(res, relax.const(alpha, dtype)))
+                res = self.block_builder.emit(
+                    relax.op.multiply(res, relax.const(alpha, dtype))
+                )
         if beta != 0:
             dtype = x.struct_info.dtype
             if beta != 1:
-                bias = self.block_builder.emit(relax.op.multiply(x, relax.const(beta, dtype)))
+                bias = self.block_builder.emit(
+                    relax.op.multiply(x, relax.const(beta, dtype))
+                )
             else:
                 bias = x
-            res = bias if res is None else self.block_builder.emit(relax.op.add(res, bias))
+            res = (
+                bias
+                if res is None
+                else self.block_builder.emit(relax.op.add(res, bias))
+            )
         return res
 
     ########## Manipulation ##########
 
     def _cat(self, node: fx.node.Node) -> relax.Var:
         args = self.retrieve_args(node)
-        return self.block_builder.emit(relax.op.concat(args[0], axis=node.kwargs["dim"]))
+        return self.block_builder.emit(
+            relax.op.concat(args[0], axis=node.kwargs["dim"])
+        )
 
     def _expand(self, node: fx.node.Node) -> relax.Var:
         args = self.retrieve_args(node)
@@ -402,7 +430,9 @@ class TorchFXImporter:
         shape = self.shape_of(x)
         start_dim = start_dim if start_dim >= 0 else len(shape) + start_dim
         end_dim = end_dim if end_dim >= 0 else len(shape) + end_dim
-        flattened = reduce(lambda x, y: x * y, [shape[i] for i in range(start_dim, end_dim + 1)])
+        flattened = reduce(
+            lambda x, y: x * y, [shape[i] for i in range(start_dim, end_dim + 1)]
+        )
         new_shape = (
             [shape[i] for i in range(0, start_dim)]
             + [flattened]
@@ -617,8 +647,12 @@ class TorchFXImporter:
             gamma = self.params[module.weight]
             beta = self.params[module.bias]
         else:
-            gamma = relax.const(torch.ones_like(module.normalized_shape), x.struct_info.dtype)
-            beta = relax.const(torch.zeros_like(module.normalized_shape), x.struct_info.dtype)
+            gamma = relax.const(
+                torch.ones_like(module.normalized_shape), x.struct_info.dtype
+            )
+            beta = relax.const(
+                torch.zeros_like(module.normalized_shape), x.struct_info.dtype
+            )
         dim_num = len(module.normalized_shape)
         axes = list(range(-dim_num, 0))
 
@@ -672,7 +706,9 @@ class TorchFXImporter:
             emb_size = weight.struct_info.shape.values[-1]
             x = self.block_builder.emit(relax.op.reshape(x, shape=[-1]))
             embedding = self.block_builder.emit(relax.op.take(weight, x, axis=0))
-            return self.block_builder.emit(relax.op.reshape(embedding, [*x_shape, emb_size]))
+            return self.block_builder.emit(
+                relax.op.reshape(embedding, [*x_shape, emb_size])
+            )
 
     def _interpolate(self, node: fx.node.Node) -> relax.Var:
         # torch.nn.functional.interpolate(
@@ -689,7 +725,9 @@ class TorchFXImporter:
         scale_factor = (
             node.args[2]
             if len(node.args) > 2
-            else (node.kwargs["scale_factor"] if "scale_factor" in node.kwargs else None)
+            else (
+                node.kwargs["scale_factor"] if "scale_factor" in node.kwargs else None
+            )
         )
         method = (
             node.args[3]
@@ -699,7 +737,9 @@ class TorchFXImporter:
         align_corners = (
             node.args[4]
             if len(node.args) > 4
-            else (node.kwargs["align_corners"] if "align_corners" in node.kwargs else None)
+            else (
+                node.kwargs["align_corners"] if "align_corners" in node.kwargs else None
+            )
         )
         recompute_scale_factor = (
             node.args[5]
@@ -722,7 +762,9 @@ class TorchFXImporter:
         if size is None:
             shape = self.shape_of(data)
             assert isinstance(shape, relax.ShapeExpr)
-            size = tuple(int(shape[i].value * scale_factor) for i in range(2, len(shape)))
+            size = tuple(
+                int(shape[i].value * scale_factor) for i in range(2, len(shape))
+            )
 
         if method.startswith("nearest"):
             method = "nearest_neighbor"
@@ -738,7 +780,11 @@ class TorchFXImporter:
 
         return self.block_builder.emit(
             relax.op.image.resize2d(
-                data, size, layout="NCHW", method=method, coordinate_transformation_mode=coord_trans
+                data,
+                size,
+                layout="NCHW",
+                method=method,
+                coordinate_transformation_mode=coord_trans,
             )
         )
 
@@ -802,7 +848,9 @@ class TorchFXImporter:
                 stride.append(1)
                 axes.append(i)
                 i = i + 1
-            sliced = self.block_builder.emit(relax.op.strided_slice(x, axes, begin, end, stride))
+            sliced = self.block_builder.emit(
+                relax.op.strided_slice(x, axes, begin, end, stride)
+            )
             sliced_shape = list(self.shape_of(sliced))
             for i in expand_dim:
                 sliced_shape.insert(i, 1)
@@ -817,18 +865,24 @@ class TorchFXImporter:
         from torch import nn
         from torch import fx
 
-        self.convert_map: Dict[Union[nn.Module, str], Callable[[fx.node.Node], relax.Var]] = {
+        self.convert_map: Dict[
+            Union[nn.Module, str], Callable[[fx.node.Node], relax.Var]
+        ] = {
             # call_module
             nn.Linear: self._linear,
             nn.Conv2d: self._conv2d,
             nn.MaxPool2d: self._max_pool2d,
             nn.AdaptiveAvgPool2d: self._adaptive_avg_pool2d(is_module=True),
             nn.Softmax: self._softmax,
-            nn.ReLU: lambda node: self.block_builder.emit(relax.op.nn.relu(self.env[node.args[0]])),
+            nn.ReLU: lambda node: self.block_builder.emit(
+                relax.op.nn.relu(self.env[node.args[0]])
+            ),
             nn.ReLU6: lambda node: self.block_builder.emit(
                 relax.op.clip(self.env[node.args[0]], 0, 6)
             ),
-            nn.SiLU: lambda node: self.block_builder.emit(relax.op.nn.silu(self.env[node.args[0]])),
+            nn.SiLU: lambda node: self.block_builder.emit(
+                relax.op.nn.silu(self.env[node.args[0]])
+            ),
             nn.Flatten: self._flatten,
             nn.BatchNorm2d: self._batch_norm_2d,
             nn.LayerNorm: self._layer_norm,
@@ -884,8 +938,12 @@ class TorchFXImporter:
             "softmax": self._softmax,
             "dropout": lambda node: self.env[node.args[0]],
             "clamp": self._clamp,
-            "relu": lambda node: self.block_builder.emit(relax.op.nn.relu(self.env[node.args[0]])),
-            "gelu": lambda node: self.block_builder.emit(relax.op.nn.gelu(self.env[node.args[0]])),
+            "relu": lambda node: self.block_builder.emit(
+                relax.op.nn.relu(self.env[node.args[0]])
+            ),
+            "gelu": lambda node: self.block_builder.emit(
+                relax.op.nn.gelu(self.env[node.args[0]])
+            ),
             "interpolate": self._interpolate,
             "size": self._size,
             "getattr": self._getattr,
@@ -913,7 +971,8 @@ class TorchFXImporter:
         for idx, (shape, dtype) in enumerate(input_info):
             inputs.append(
                 relax.Var(
-                    f"inp_{idx}", relax.TensorStructInfo(shape, self._convert_data_type(dtype))
+                    f"inp_{idx}",
+                    relax.TensorStructInfo(shape, self._convert_data_type(dtype)),
                 )
             )
 
@@ -932,7 +991,9 @@ class TorchFXImporter:
         else:
             func_attrs = None
 
-        with self.block_builder.function(name=func_name, params=inputs.copy(), attrs=func_attrs):
+        with self.block_builder.function(
+            name=func_name, params=inputs.copy(), attrs=func_attrs
+        ):
             output = None
             with self.block_builder.dataflow():
                 # Translate model parameters.
@@ -941,13 +1002,24 @@ class TorchFXImporter:
                     dtype = self._convert_data_type(str(param.data.dtype))
                     if dtype in ("float32", "float16"):
                         if not keep_params_as_input:
-                            self.params[param] = relax.const(param.data.cpu().numpy(), dtype)
+                            self.params[param] = relax.const(
+                                param.data.cpu().numpy(), dtype
+                            )
+                        if dtype != "float32":
+                            self.params[param] = self.block_builder.emit(
+                                relax.op.wrap_param(self.params[param], "float32")
+                            )
                     else:
-                        raise ValueError("Unsupported data type for model parameters: %s" % dtype)
+                        raise ValueError(
+                            "Unsupported data type for model parameters: %s" % dtype
+                        )
                 # Translate the model.
                 for node in graph.nodes:
+                    print(node.op, node.target, node.args, node.kwargs, node.name)
                     if node.op == "placeholder":
-                        assert len(inputs) > 0, "Provided inputs is less than actual inputs"
+                        assert (
+                            len(inputs) > 0
+                        ), "Provided inputs is less than actual inputs"
                         self.env[node] = inputs.pop(0)
                     elif node.op == "output":
                         args = self.retrieve_args(node)
@@ -982,6 +1054,11 @@ class TorchFXImporter:
                         self.env[node] = self.convert_map[node.target](node)
                     else:
                         raise ValueError(f"Unsupported op {node.op}")
+                    if isinstance(self.env[node].struct_info, relax.TensorStructInfo):
+                        if self.env[node].struct_info.dtype == "float16":
+                            self.env[node] = self.block_builder.emit(
+                                relax.op.wrap_param(self.env[node], "float32")
+                            )
             assert output is not None
             self.block_builder.emit_func_output(output)
 

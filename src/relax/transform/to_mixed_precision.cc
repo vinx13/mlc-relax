@@ -296,7 +296,11 @@ class ToMixedPrecisionRewriter : public ExprMutator {
     auto fvisitleaf = [&](const Expr& expr, std::array<NType, 1> to) -> Expr {
       const auto* tensor = GetStructInfoAs<TensorStructInfoNode>(expr);
       ICHECK(tensor != nullptr) << "Only support rewriting tensor expr";
+      // We only rewrite the expr if the dtype is not the same as the given dtype
       if (NTypeEqual()(to[0], NTypeFrom(expr))) return expr;
+      // We only rewrite the expr if the dtype is fp16 or fp32, dtypes such as int32, float64 is not
+      // supported to be rewritten
+      if (tensor->dtype != fp16_ && tensor->dtype != fp32_) return expr;
       return astype(expr, DataType(String2DLDataType(to[0].LeafValue())));
     };
     return TransformTupleLeaf<String>(expr, std::array<NType, 1>({to}), fvisitleaf);
@@ -402,9 +406,9 @@ class ToMixedPrecisionRewriter : public ExprMutator {
     Op op = GetRef<Op>(op_node);
     if (wrap_param_op.same_as(op)) {
       // wrap_param
-      const auto* constant = call_node->args[0].as<ConstantNode>();
-      ICHECK(constant != nullptr) << "Invalid wrap_param: " << GetRef<Call>(call_node);
-      ReEmitBinding(binding, GetRef<Expr>(constant));
+      // const auto* constant = call_node->args[0].as<ConstantNode>();
+      // ICHECK(constant != nullptr) << "Invalid wrap_param: " << GetRef<Call>(call_node);
+      ReEmitBinding(binding, call_node->args[0]);
       return;
     }
     DataType to;

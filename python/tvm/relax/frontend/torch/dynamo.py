@@ -152,13 +152,14 @@ def dynamo_capture_subgraphs(model, *params, **kwargs) -> tvm.IRModule:
             graph_module,
             input_info,
             keep_params_as_input=keep_params_as_input,
-            unwrap_unit_return_tuple=True,
+            # unwrap_unit_return_tuple=True,
         )
         mod[f"subgraph_{len(mod.get_global_vars())}"] = mod_["main"]
         return graph_module.forward
 
     dynamo.reset()
     compiled_model = torch.compile(model, backend=_capture)
+    
     compiled_model(*params)
     return mod
 

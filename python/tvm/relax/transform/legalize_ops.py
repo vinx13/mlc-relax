@@ -630,7 +630,21 @@ def _image_resize2d(bb: BlockBuilder, call: Call) -> Expr:
 ##########################################################
 
 
+def _argmax_argmin(te_func: TEFunc) -> LegalizeFunc:
+    def argmax_argmin_call_te(bb: BlockBuilder, call: Call) -> Expr:
+        return bb.call_te(
+            te_func,
+            call.args[0],
+            None if call.attrs.axis is None else call.attrs.axis.value,
+            call.attrs.keepdims,
+        )
+
+    return argmax_argmin_call_te
+
+
 DEFAULT_OP_LEGALIZE_MAP: Dict[str, LegalizeFunc] = {
+    "relax.argmax": _argmax_argmin(topi.argmax),
+    "relax.argmin": _argmax_argmin(topi.argmin),
     # Arithmetic and comparison
     "relax.abs": _call_topi_without_attr(topi.abs),
     "relax.cos": _call_topi_without_attr(topi.cos),
