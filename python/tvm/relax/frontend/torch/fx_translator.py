@@ -1015,7 +1015,7 @@ class TorchFXImporter:
                         )
                 # Translate the model.
                 for node in graph.nodes:
-                    print(node.op, node.target, node.args, node.kwargs, node.name)
+                    # print(node.op, node.target, node.args, node.kwargs, node.name)
                     if node.op == "placeholder":
                         assert (
                             len(inputs) > 0
@@ -1054,7 +1054,9 @@ class TorchFXImporter:
                         self.env[node] = self.convert_map[node.target](node)
                     else:
                         raise ValueError(f"Unsupported op {node.op}")
-                    if isinstance(self.env[node].struct_info, relax.TensorStructInfo):
+                    if hasattr(self.env[node], "struct_info") and isinstance(
+                        self.env[node].struct_info, relax.TensorStructInfo
+                    ):
                         if self.env[node].struct_info.dtype == "float16":
                             self.env[node] = self.block_builder.emit(
                                 relax.op.wrap_param(self.env[node], "float32")

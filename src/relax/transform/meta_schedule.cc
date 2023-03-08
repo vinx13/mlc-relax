@@ -123,7 +123,17 @@ Pass MetaScheduleApplyDatabase(Optional<String> work_dir) {
           result.Set(gv, new_prim_func);
           continue;
         } else {
-          LOG(WARNING) << "Tuning record is not found for primfunc: " << gv->name_hint;
+          IRModule new_mod = tir::transform::DefaultGPUSchedule()(tir_mod);
+          ICHECK_EQ(new_mod->functions.size(), 1);
+          BaseFunc new_base_func = (*new_mod->functions.begin()).second;
+          ICHECK(new_base_func->IsInstance<tir::PrimFuncNode>());
+          tir::PrimFunc new_prim_func = Downcast<tir::PrimFunc>(new_base_func);
+          // copy the original attrs
+          new_prim_func = WithAttrs(std::move(new_prim_func), {prim_func->attrs->dict});
+          result.Set(gv, new_prim_func);
+          LOG(WARNING) << "Tuning record is not found for primfunc: " << gv->name_hint
+                       << ", apply default schedule pass instead";
+          continue;
         }
       }
       result.Set(gv, base_func);
