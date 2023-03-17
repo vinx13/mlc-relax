@@ -89,8 +89,8 @@ class CUDAGraphCache : public Object {
    * \param capture_func (Tuple[Tensor0, ..., TensorN]) -> (). The function to capture a cuda graph.
    * \return The cache entry.
    */
-  Entry GetOrCapture(VirtualMachine* vm, const ObjectRef& alloc_func,
-                     const ObjectRef& capture_func) {
+  Entry GetOrCapture(VirtualMachine* vm, const ObjectRef& capture_func, ObjectRef args, int64_t entry_index) {
+    // TODO(wuwei): use entry_index to speed up the lookup.
     if (auto it = entries_.find(capture_func); it != entries_.end()) {
       return it->second;
     }
@@ -99,17 +99,17 @@ class CUDAGraphCache : public Object {
     CUDA_CALL(cudaStreamCreate(&capture_stream));
     CUDAGraphCache::Entry entry;
 
-    // Invoke the alloc function
-    TVMArgs alloc_func_args(nullptr, nullptr, 0);
-    TVMRetValue alloc_func_rv;
-    vm->InvokeClosurePacked(alloc_func, alloc_func_args, &alloc_func_rv);
-    entry.alloc_storages = alloc_func_rv;
+    // // Invoke the alloc function
+    // TVMArgs alloc_func_args(nullptr, nullptr, 0);
+    // TVMRetValue alloc_func_rv;
+    // vm->InvokeClosurePacked(alloc_func, alloc_func_args, &alloc_func_rv);
+    // entry.alloc_storages = alloc_func_rv;
 
     // Set up arguments for the graph execution
     std::vector<TVMValue> values(1);
     std::vector<int> tcodes(1);
     TVMArgsSetter setter(values.data(), tcodes.data());
-    setter(0, entry.alloc_storages);
+    setter(0, args);
     TVMRetValue capture_func_rv;
 
     // Warm up run
@@ -147,12 +147,14 @@ TVM_REGISTER_GLOBAL("vm.builtin.get_captured_cuda_graph")
     .set_body([](TVMArgs args, TVMRetValue* rv) {
       ICHECK_EQ(args.size(), 3);
       VirtualMachine* vm = VirtualMachine::GetContextPtr(args[0]);
-      ObjectRef alloc_func = args[1];  // () -> Tuple[Tensor0, ... TensorN]
+      // ObjectRef alloc_func = args[1];  // () -> Tuple[Tensor0, ... TensorN]
       ObjectRef capture_func =
-          args[2];  // (Tuple[Tensor0, ... TensorN]) -> Tuple[Tensor0, ... TensorN']
+          args[1];  // (Tuple[Tensor0, ... TensorN]) -> Tuple[Tensor0, ... TensorN']
+      ObjectRef func_args = args[2];
+      int64_t entry_index = args[3];
 
       CUDAGraphCache* cache = CUDAGraphCache::Get();
-      auto cached = cache->GetOrCapture(vm, alloc_func, capture_func);
+      auto cached = cache->GetOrCapture(vm, capture_func, func_args, entry_index);
       *rv = Array<ObjectRef>{cached.graph, cached.alloc_storages, cached.states};
     });
 
@@ -161,6 +163,23 @@ TVM_REGISTER_GLOBAL("vm.builtin.cuda_graph_launch").set_body_typed([](CUDAGraph 
   CUDA_CALL(cudaGraphInstantiate(&cuda_graph_exec, cuda_graph->handle_, NULL, NULL, 0));
   CUDA_CALL(cudaGraphLaunch(cuda_graph_exec, CUDAThreadEntry::ThreadLocal()->stream));
   CUDA_CALL(cudaGraphExecDestroy(cuda_graph_exec));
+});
+
+using ExecutionCache = dmlc::ThreadLocalStore<std::unordered_map<int64_t, ObjectRef>>;
+
+TVM_REGISTER_GLOBAL("vm.builtin.run_cached").set_body([](TVMArgs args, TVMRetValue* rv) {
+  ICHECK_EQ(args.size(), 3);
+  VirtualMachine* vm = VirtualMachine::GetContextPtr(args[0]);
+  ObjectRef func = args[1];
+  int64_t entry_index = args[2];
+  auto* cache = ExecutionCache::Get();
+  if (cache->count(entry_index)) {
+    *rv = (*cache)[entry_index];
+    return;
+  }
+  TVMArgs func_args(nullptr, nullptr, 0);
+  vm->InvokeClosurePacked(func, func_args, rv);
+  (*cache)[entry_index] = *rv;
 });
 
 }  // namespace relax_vm

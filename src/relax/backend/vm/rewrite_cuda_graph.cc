@@ -88,9 +88,20 @@ class StaticRegionExtractor : public ExprVisitor {
     std::vector<StaticRegion> static_regions;  // The list of static regions in the current scope.
   };
 
+  // void CollectAllocStorages(const BindingBlockNode* block) {
+  //   static const auto& mem_alloc_storage_op = Op::Get("relax.memory.alloc_storage");
+  //   for (const auto& binding : block->bindings) {
+  //     if (const auto* alloc_storage_call = binding->value.as<CallNode>()) {
+  //       if (alloc_storage_call->op == mem_alloc_storage_op) {
+  //         scope_.graph.AddBinding(binding, true);
+  //       }
+  //     }
+  //   }
+  // }
   void VisitBindingBlock_(const BindingBlockNode* block) final {
     ScopeInfo scope;
     std::swap(scope, scope_);
+    // CollectAllocStorages(block);
     for (const auto& binding : block->bindings) {
       VisitBinding(binding);
     }
@@ -368,11 +379,195 @@ class CUDAGraphRewriter : public ExprMutator {
   const ExternFunc builtin_cuda_graph_launch_{"vm.builtin.cuda_graph_launch"};
 };
 
+namespace v2 {
+
+
+struct Scope {};
+struct Region {
+  std::vector<const VarNode*> bindings;
+  std::vector<const VarNode*> input;
+  std::vector<const VarNode*> output;
+  bool is_completed = false;
+  bool has_kernel_launch = false;
+
+  void AddInput(const VarNode* var) {
+    if (!input_set.count(var)) {
+      input.push_back(var);
+      input_set.insert(var);
+    }
+  }
+
+  void AddOutut(const VarNode* var) {
+    if (!output_set.count(var)) {
+      output.push_back(var);
+      output_set.insert(var);
+    }
+  }
+
+ private:
+  std::unordered_set<const VarNode*> input_set;
+  std::unordered_set<const VarNode*> output_set;
+};
+
+class CUDAGraphRewritePlanner : public ExprVisitor {
+ public:
+  CUDAGraphRewritePlanner(IRModule mod) : mod_(mod) {}
+  void Plan() {
+    for (const auto& [gv, func] : mod_->functions) {
+      if (func->IsInstance<FunctionNode>()) {
+        VisitExpr(func);
+      }
+    }
+    // print regions
+    std::ostringstream os;
+    os << "Partitioned regions: " << std::endl;
+    for (int i = 0; i < static_cast<int>(regions_.size()); ++i) {
+      os << "[Region " << i << "]" << std::endl;
+
+      os << "func(";
+      for (const auto& var : regions_[i].input) {
+        os << var << ", ";
+      }
+      os << ") -> {\n";
+      for (const auto* binding_var : regions_[i].bindings) {
+        os << "  " << all_bindings_[binding_var] << std::endl;
+      }
+      os << "  return (";
+      for (const auto& var : regions_[i].output) {
+        os << var << ", ";
+      }
+      os << ")\n}\n";
+      os << "\n";
+    }
+    LOG(INFO) << os.str();
+  }
+  void VisitExpr_(const FunctionNode* func) final {
+    // TODO(wuwei): add static params
+    ExprVisitor::VisitExpr_(func);
+  }
+
+  void VisitBindingBlock_(const BindingBlockNode* binding_block) final {
+    Scope scope;
+    std::swap(scope, scope_);
+    for (const auto& binding : binding_block->bindings) {
+      if (binding->IsInstance<VarBindingNode>()) {
+        all_bindings_.emplace(binding->var.get(), Downcast<VarBinding>(binding));
+      }
+      VisitBinding(binding);
+    }
+    std::swap(scope, scope_);
+  }
+
+  void VisitBinding_(const VarBindingNode* binding, const CallNode* call) final {
+    static const auto& mem_alloc_storage_op = Op::Get("relax.memory.alloc_storage");
+    static const auto& mem_alloc_tensor_op = Op::Get("relax.memory.alloc_tensor");
+    static const auto& mem_kill_storage_op = Op::Get("relax.memory.kill_storage");
+    static const auto& mem_kill_tensor_op = Op::Get("relax.memory.kill_tensor");
+    if (call->op.same_as(mem_alloc_storage_op) && IsStaticAllocStorage(binding)) {
+      AddStorage(binding);
+      return;
+    }
+    if (call->op.same_as(mem_alloc_tensor_op)) {
+      // TODO(wuwei): check static shape and offset
+      AddPendingBinding(binding);
+      return;
+    }
+    if (call->op.same_as(mem_kill_storage_op) || call->op.same_as(mem_kill_tensor_op)) {
+      // never lift them
+      return;
+    }
+    if ((call->op->IsInstance<GlobalVarNode>() &&
+         mod_->Lookup(Downcast<GlobalVar>(call->op))->IsInstance<tir::PrimFuncNode>()) ||
+        call->op->IsInstance<ExternFuncNode>()
+        // TODO(wuwei): check properties of the extern function since not all extern functions are
+        // safe to capture
+    ) {
+      if (std::all_of(call->args.begin(), call->args.end(),
+                      [this](const Expr& expr) { return IsStatic(expr); })) {
+        AddPendingBinding(binding);
+        for (const auto& arg : call->args) {
+          if (const auto* arg_var = arg.as<VarNode>()) {
+            if (auto it = binding_to_region_index_.find(arg_var); it != binding_to_region_index_.end()) {
+              regions_[it->second].AddOutut(binding->var.get());
+            }
+          }
+        }
+      }
+    }
+  }
+
+  bool IsStatic(const Expr& expr) {
+    if (expr->IsInstance<PrimValueNode>() || expr->IsInstance<ConstantNode>()) {
+      return true;
+    }
+    if (const auto* var = expr.as<VarNode>()) {
+      return static_bindings_.count(var) || pending_bindings_.count(var);
+    }
+    if (const auto* tuple = expr.as<TupleNode>()) {
+      return std::all_of(tuple->fields.begin(), tuple->fields.end(),
+                         [this](const Expr& expr) { return IsStatic(expr); });
+    }
+    return false;
+  }
+
+  void VisitBinding_(const VarBindingNode* binding, const VarNode* var) final {
+    if (static_bindings_.count(var)) {
+      AddPendingBinding(binding);
+    }
+  }
+
+ private:
+  bool IsStaticAllocStorage(const VarBindingNode* binding) {
+    const auto* alloc_storage_call = binding->value.as<CallNode>();
+    auto shape = Downcast<ShapeExpr>(alloc_storage_call->args[0]);
+    return std::all_of(shape->values.begin(), shape->values.end(),
+                       [](const PrimExpr& expr) { return expr.as<IntImmNode>() != nullptr; });
+  }
+
+  void AddStorage(const VarBindingNode* binding) {
+    static_storages_.insert(binding->var.get());
+    alloc_storages_.push_back(binding);
+    static_bindings_.insert(binding->var.get());
+  }
+
+  void AddPendingBinding(const VarBindingNode* binding) {
+    pending_bindings_.insert(binding->var.get());
+  }
+
+  void FinishRegion() {
+    Region region;
+    int region_index = static_cast<int>(regions_.size());
+    for (const auto* pending_binding : pending_bindings_) {
+      binding_to_region_index_[pending_binding] = region_index;
+      static_bindings_.insert(pending_binding);
+      region.bindings.push_back(pending_binding);
+    }
+    region.is_completed = true;
+    regions_.push_back(region);
+    pending_bindings_.clear();
+  }
+
+  IRModule mod_;
+  Scope scope_;
+  std::unordered_map<const VarNode*, VarBinding> all_bindings_;
+  std::unordered_set<const VarNode*> static_storages_;
+  std::vector<const VarBindingNode*> alloc_storages_;
+  std::unordered_set<const VarNode*> static_bindings_;
+  std::unordered_set<const VarNode*> pending_bindings_;
+  std::vector<Region> regions_;
+  std::unordered_map<const VarNode*, int> binding_to_region_index_;
+};
+
+}  // namespace v2
+
 IRModule RewriteCUDAGraph(IRModule mod) {
-  CUDAGraphRewriter rewriter(mod);
-  mod = rewriter.Rewrite();
-  LOG(INFO) << mod;
+  v2::CUDAGraphRewritePlanner planner(mod);
+  planner.Plan();
   return mod;
+  // CUDAGraphRewriter rewriter(mod);
+  // mod = rewriter.Rewrite();
+  // LOG(INFO) << mod;
+  // return mod;
 }
 
 namespace transform {
