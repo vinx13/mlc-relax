@@ -19,7 +19,11 @@
 #include <tvm/relax/backend.h>
 #include <tvm/relax/expr_functor.h>
 #include <tvm/relax/type.h>
+#include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
+
+#include "../../../support/insertion_ordered_set.h"
+#include "../../../support/utils.h"
 
 namespace tvm {
 namespace relax {
@@ -133,6 +137,8 @@ class StaticRegionExtractor : public ExprVisitor {
     static const auto& mem_alloc_tensor_op = Op::Get("relax.memory.alloc_tensor");
     static const auto& mem_kill_storage_op = Op::Get("relax.memory.kill_storage");
     static const auto& mem_kill_tensor_op = Op::Get("relax.memory.kill_tensor");
+    static const auto& reshape_op = Op::Get("relax.reshape");
+
     if (const auto* rhs_var = value.as<VarNode>()) {
       if (scope_.graph.bindings.count(rhs_var)) {
         scope_.graph.AddBinding(binding, false);
@@ -147,10 +153,10 @@ class StaticRegionExtractor : public ExprVisitor {
         return;
       } else if (call->op == mem_kill_tensor_op || call->op == mem_kill_storage_op) {
         return;
-      } else if (const auto* gv = call->op.as<GlobalVarNode>(); gv != nullptr ||
-                                                                call->op == mem_alloc_storage_op ||
-                                                                call->op == mem_alloc_tensor_op) {
-        if (gv != nullptr) {
+      } else if (call->op.as<GlobalVarNode>() || call->op.as<ExternFuncNode>() ||
+                 call->op.as<tir::PrimFuncNode>() || call->op == mem_alloc_storage_op ||
+                 call->op == mem_alloc_tensor_op || call->op == reshape_op) {
+        if (const auto* gv = call->op.as<GlobalVarNode>()) {
           auto func = mod_->Lookup(GetRef<GlobalVar>(gv));
           if (!func->IsInstance<tir::PrimFuncNode>()) {
             return;
@@ -202,6 +208,10 @@ class StaticRegionExtractor : public ExprVisitor {
         scope_.graph.AddOutput(binding->var.get());
         return;
       }
+    }
+    LOG(INFO) << "Unsupported: " << value << value->GetTypeKey();
+    if (const auto* call = value.as<CallNode>()) {
+      LOG(INFO) << call->op->GetTypeKey();
     }
     SummarizeStaticRegion();
   }
@@ -255,7 +265,8 @@ class StaticRegionExtractor : public ExprVisitor {
       auto it = scope_.graph.bindings.find(var);
       const VarBindingNode* binding = it->second;
       if (const CallNode* call = binding->value.as<CallNode>();
-          call != nullptr && call->op.as<GlobalVarNode>()) {
+          call != nullptr && (call->op.as<GlobalVarNode>() || call->op.as<ExternFuncNode>() ||
+                              call->op.as<tir::PrimFuncNode>())) {
         if (region.launch_point == nullptr) {
           region.launch_point = binding;
         }
@@ -381,7 +392,6 @@ class CUDAGraphRewriter : public ExprMutator {
 
 namespace v2 {
 
-
 struct Scope {};
 struct Region {
   std::vector<const VarNode*> bindings;
@@ -397,7 +407,7 @@ struct Region {
     }
   }
 
-  void AddOutut(const VarNode* var) {
+  void AddOutput(const VarNode* var) {
     if (!output_set.count(var)) {
       output.push_back(var);
       output_set.insert(var);
@@ -409,38 +419,157 @@ struct Region {
   std::unordered_set<const VarNode*> output_set;
 };
 
+// For each lifted function,
+// - bindings, first binding, first launch
+// - input to index (vars in original function)
+// - output to index (vars in original function)
+
+struct RewritePlan {
+  Function func;
+  bool is_alloc;  // is alloc or capture
+  const VarNode* launch_point;
+  // bindings to remove
+  std::unordered_set<const VarNode*> lifted_bindings;
+  // Remapping of the boundary (input/output) variables in the original module
+  std::unordered_map<const VarNode*, int> output_index;
+  std::vector<const VarNode*> input_args;
+};
+
+class FuncBuilder : public ExprMutator {
+ public:
+  void AddBinding(const VarBindingNode* binding) { bindings_.push_back(binding); }
+  void AddInput(const VarNode* var) { inputs_.push_back(var); }
+  void AddOutput(const VarNode* var) { outputs_.push_back(var); }
+
+  Function Build() {
+    // setup inputs
+    Array<Var> params;
+    for (const auto* var : inputs_) {
+      auto var_node = make_object<VarNode>(*var);
+      auto new_var = Var(var_node);
+      var_remap_[var->vid] = new_var;
+      params.push_back(new_var);
+    }
+    builder_->BeginBindingBlock();
+    for (const auto* binding : bindings_) {
+      VisitBinding_(binding);
+    }
+    Array<Expr> outputs;
+    for (const auto* var : outputs_) {
+      outputs.push_back(VisitExpr_(var));
+    }
+    auto output = builder_->Emit(Tuple(outputs));
+    auto block = builder_->EndBlock();
+    auto body = builder_->Normalize(SeqExpr({block}, output));
+    auto func = Function(params, body, Downcast<StructInfo>(output->struct_info_.value()));
+    return func;
+  }
+
+  std::vector<const VarNode*> inputs_;
+  std::vector<const VarNode*> outputs_;
+  // std::unordered_set<const VarNode*> inputs_set_;
+  // std::unordered_set<const VarNode*> outputs_set_;
+  std::vector<const VarBindingNode*> bindings_;
+
+
+};
+
 class CUDAGraphRewritePlanner : public ExprVisitor {
  public:
   CUDAGraphRewritePlanner(IRModule mod) : mod_(mod) {}
-  void Plan() {
+  std::vector<RewritePlan> Plan() {
     for (const auto& [gv, func] : mod_->functions) {
       if (func->IsInstance<FunctionNode>()) {
         VisitExpr(func);
       }
     }
-    // print regions
-    std::ostringstream os;
-    os << "Partitioned regions: " << std::endl;
-    for (int i = 0; i < static_cast<int>(regions_.size()); ++i) {
-      os << "[Region " << i << "]" << std::endl;
+    // // print regions
+    // std::ostringstream os;
+    // os << "Partitioned regions: " << std::endl;
+    // for (int i = 0; i < static_cast<int>(regions_.size()); ++i) {
+    //   os << "[Region " << i << "]" << std::endl;
 
-      os << "func(";
-      for (const auto& var : regions_[i].input) {
-        os << var << ", ";
+    //   os << "func(";
+    //   for (const auto& var : regions_[i].input) {
+    //     os << GetRef<Var>(var) << ", ";
+    //   }
+    //   os << ") -> {\n";
+    //   for (const auto* binding_var : regions_[i].bindings) {
+    //     os << "  " << all_bindings_[binding_var] << std::endl;
+    //   }
+    //   os << "  return (";
+    //   for (const auto& var : regions_[i].output) {
+    //     os << GetRef<Var>(var) << ", ";
+    //   }
+    //   os << ")\n}\n";
+    //   os << "\n";
+    // }
+    // LOG(FATAL) << os.str();
+
+    // ---------------
+    std::vector<RewritePlan> plans;
+
+    for (const auto& region : regions_) {
+      RewritePlan plan;
+      plan.is_alloc = false;
+
+      ICHECK(!region.bindings.empty());
+      plan.launch_point = region.bindings.front();
+
+      FuncBuilder builder;
+      for (const auto* binding_var : region.bindings) {
+        builder.AddBinding(all_bindings_[binding_var].get());
       }
-      os << ") -> {\n";
-      for (const auto* binding_var : regions_[i].bindings) {
-        os << "  " << all_bindings_[binding_var] << std::endl;
+      for (const auto* var : region.input) {
+        builder.AddInput(var);
       }
-      os << "  return (";
-      for (const auto& var : regions_[i].output) {
-        os << var << ", ";
+      for (const auto* var : region.output) {
+        builder.AddOutput(var);
       }
-      os << ")\n}\n";
-      os << "\n";
+
+      plan.lifted_bindings.insert(region.bindings.begin(), region.bindings.end());
+
+      Array<Expr> outputs;
+      for (const auto& var : region.output) {
+        plan.output_index[var] = outputs.size();
+      }
+      Array<Var> inputs;
+      for (const auto& var : region.input) {
+        plan.input_args.push_back(var);
+      }
+      plan.func = builder.Build();
+      // LOG(INFO) << "Generated function:";
+      // LOG(FATAL) << func;
+      plans.push_back(plan);
     }
-    LOG(INFO) << os.str();
+
+    // ---------------
+    // alloc
+    // FIXME: it assumes one binding block now
+    if (!alloc_storages_.empty()) {
+      RewritePlan plan;
+      plan.is_alloc = true;
+      plan.launch_point = alloc_storages_.front()->var.get();
+      BlockBuilder builder = BlockBuilder::Create(NullOpt);
+      Array<Expr> outputs;
+      builder->BeginBindingBlock();
+      for (const auto* alloc_storage : alloc_storages_) {
+        builder->EmitNormalized(GetRef<VarBinding>(alloc_storage));
+        plan.output_index[alloc_storage->var.get()] = outputs.size();
+        outputs.push_back(alloc_storage->var);
+        plan.lifted_bindings.insert(alloc_storage->var.get());
+      }
+      auto output_tuple = builder->Emit(Tuple(outputs));
+      auto block = builder->EndBlock();
+      Expr body = builder->Normalize(SeqExpr({block}, output_tuple));
+      auto func_alloc = Function({}, body, NullOpt);
+      plan.func = func_alloc;
+      plans.push_back(plan);
+    }
+    // LOG(INFO) << "Got " << plans.size() << " rewrite plans.";
+    return plans;
   }
+
   void VisitExpr_(const FunctionNode* func) final {
     // TODO(wuwei): add static params
     ExprVisitor::VisitExpr_(func);
@@ -455,6 +584,7 @@ class CUDAGraphRewritePlanner : public ExprVisitor {
       }
       VisitBinding(binding);
     }
+    FinishRegion();
     std::swap(scope, scope_);
   }
 
@@ -463,57 +593,156 @@ class CUDAGraphRewritePlanner : public ExprVisitor {
     static const auto& mem_alloc_tensor_op = Op::Get("relax.memory.alloc_tensor");
     static const auto& mem_kill_storage_op = Op::Get("relax.memory.kill_storage");
     static const auto& mem_kill_tensor_op = Op::Get("relax.memory.kill_tensor");
+    static const auto& builtin_alloc_tensor_op = Op::Get("relax.builtin.alloc_tensor");
     if (call->op.same_as(mem_alloc_storage_op) && IsStaticAllocStorage(binding)) {
       AddStorage(binding);
       return;
     }
     if (call->op.same_as(mem_alloc_tensor_op)) {
+      Var storage = Downcast<Var>(call->args[0]);
       // TODO(wuwei): check static shape and offset
-      AddPendingBinding(binding);
+      if (IsStatic(storage)) {
+        AddPendingBinding(binding);
+        pending_input_.push_back(storage.get());
+      } else {
+        LOG(INFO) << "FINISH";
+        FinishRegion();
+      }
+      return;
+    }
+    if (call->op.same_as(builtin_alloc_tensor_op)) {
       return;
     }
     if (call->op.same_as(mem_kill_storage_op) || call->op.same_as(mem_kill_tensor_op)) {
       // never lift them
       return;
     }
-    if ((call->op->IsInstance<GlobalVarNode>() &&
-         mod_->Lookup(Downcast<GlobalVar>(call->op))->IsInstance<tir::PrimFuncNode>()) ||
-        call->op->IsInstance<ExternFuncNode>()
-        // TODO(wuwei): check properties of the extern function since not all extern functions are
-        // safe to capture
-    ) {
-      if (std::all_of(call->args.begin(), call->args.end(),
-                      [this](const Expr& expr) { return IsStatic(expr); })) {
-        AddPendingBinding(binding);
-        for (const auto& arg : call->args) {
-          if (const auto* arg_var = arg.as<VarNode>()) {
-            if (auto it = binding_to_region_index_.find(arg_var); it != binding_to_region_index_.end()) {
-              regions_[it->second].AddOutut(binding->var.get());
-            }
+    // if ((call->op->IsInstance<GlobalVarNode>() &&
+    //      mod_->Lookup(Downcast<GlobalVar>(call->op))->IsInstance<tir::PrimFuncNode>()) ||
+    //     call->op->IsInstance<ExternFuncNode>()
+    // or is_relax_op
+    //     // TODO(wuwei): check properties of the extern function since not all extern functions
+    //     are
+    //     // safe to capture
+    // )
+    // {
+
+    Array<Expr> non_static_outputs;
+    if (std::all_of(call->args.begin(), call->args.end(), [&](const Expr& expr) {
+          if (expr->IsInstance<ExternFuncNode>()) {
+            return true;
           }
+          if (!IsStatic(expr)) {
+            non_static_outputs.push_back(Downcast<Var>(expr));
+          }
+          return IsStatic(expr);
+        })) {
+      AddPendingBinding(binding);
+      for (const auto& arg : call->args) {
+        if (const auto* arg_var = arg.as<VarNode>()) {
+          if (pending_bindings_.count(arg_var)) {
+            // this is internal binding
+            continue;
+          }
+          pending_input_.push_back(arg_var);
+        }
+      }
+    } else {
+      LOG(INFO) << "FINISH " << GetRef<Call>(call) << " " << non_static_outputs;
+      FinishRegion();
+    }
+    for (const auto& arg : call->args) {
+      if (const auto* arg_var = arg.as<VarNode>()) {
+        if (auto it = binding_to_region_index_.find(arg_var);
+            it != binding_to_region_index_.end()) {
+          regions_[it->second].AddOutput(arg_var);
+        }
+      }
+    }
+    // }
+  }
+
+  void VisitBinding_(const VarBindingNode* binding, const VarNode* var) final {
+    if (IsStatic(GetRef<Var>(var))) {
+      AddPendingBinding(binding);
+      if (!pending_bindings_.count(var)) {
+        pending_input_.push_back(var);
+      }
+    } else {
+      LOG(INFO) << "FINISH";
+      FinishRegion();
+      if (auto it = binding_to_region_index_.find(var); it != binding_to_region_index_.end()) {
+        regions_[it->second].AddOutput(var);
+      }
+    }
+  }
+
+  void VisitBinding_(const VarBindingNode* binding, const TupleNode* tuple) final {
+    if (std::all_of(tuple->fields.begin(), tuple->fields.end(),
+                    [&](const Expr& expr) { return IsStatic(expr); })) {
+      AddPendingBinding(binding);
+      for (const auto& field : tuple->fields) {
+        if (const auto* field_var = field.as<VarNode>()) {
+          if (pending_bindings_.count(field_var)) {
+            // this is internal binding
+            continue;
+          }
+          pending_input_.push_back(field_var);
+        }
+      }
+    } else {
+      LOG(INFO) << "FINISH";
+      FinishRegion();
+    }
+    for (const auto& field : tuple->fields) {
+      if (const auto* field_var = field.as<VarNode>()) {
+        if (auto it = binding_to_region_index_.find(field_var);
+            it != binding_to_region_index_.end()) {
+          regions_[it->second].AddOutput(field_var);
         }
       }
     }
   }
 
+  void VisitBinding_(const VarBindingNode* binding, const TupleGetItemNode* tuple_get_item) {
+    if (IsStatic(tuple_get_item->tuple)) {
+      AddPendingBinding(binding);
+      if (!pending_bindings_.count(tuple_get_item->tuple.as<VarNode>())) {
+        pending_input_.push_back(tuple_get_item->tuple.as<VarNode>());
+      }
+    } else {
+      FinishRegion();
+      if (auto it = binding_to_region_index_.find(tuple_get_item->tuple.as<VarNode>());
+          it != binding_to_region_index_.end()) {
+        regions_[it->second].AddOutput(tuple_get_item->tuple.as<VarNode>());
+      }
+    }
+  }
+
+  bool IsStatic(const PrimExpr& expr) {
+    return expr->IsInstance<tir::IntImmNode>() || expr->IsInstance<tir::FloatImmNode>();
+  }
+
   bool IsStatic(const Expr& expr) {
-    if (expr->IsInstance<PrimValueNode>() || expr->IsInstance<ConstantNode>()) {
+    if (expr->IsInstance<ConstantNode>() || expr->IsInstance<DataTypeImmNode>()) {
       return true;
+    }
+    if (const auto* prim_value = expr.as<PrimValueNode>()) {
+      return IsStatic(prim_value->value);
     }
     if (const auto* var = expr.as<VarNode>()) {
       return static_bindings_.count(var) || pending_bindings_.count(var);
+    }
+    if (const auto* shape = expr.as<ShapeExprNode>()) {
+      return std::all_of(shape->values.begin(), shape->values.end(),
+                         [this](const PrimExpr& expr) { return IsStatic(expr); });
     }
     if (const auto* tuple = expr.as<TupleNode>()) {
       return std::all_of(tuple->fields.begin(), tuple->fields.end(),
                          [this](const Expr& expr) { return IsStatic(expr); });
     }
+    LOG(INFO) << expr << " is not static " << expr->GetTypeKey();
     return false;
-  }
-
-  void VisitBinding_(const VarBindingNode* binding, const VarNode* var) final {
-    if (static_bindings_.count(var)) {
-      AddPendingBinding(binding);
-    }
   }
 
  private:
@@ -532,19 +761,40 @@ class CUDAGraphRewritePlanner : public ExprVisitor {
 
   void AddPendingBinding(const VarBindingNode* binding) {
     pending_bindings_.insert(binding->var.get());
+    pending_binding_list_.push_back(binding->var.get());
   }
 
   void FinishRegion() {
+    if (pending_bindings_.empty()) return;
     Region region;
     int region_index = static_cast<int>(regions_.size());
-    for (const auto* pending_binding : pending_bindings_) {
-      binding_to_region_index_[pending_binding] = region_index;
+    for (const auto* pending_binding : pending_binding_list_) {
+      if (all_bindings_[pending_binding]->value->IsInstance<CallNode>()) {
+        const auto* call = all_bindings_[pending_binding]->value.as<CallNode>();
+        if (call->op->IsInstance<GlobalVarNode>() || call->op->IsInstance<ExternFuncNode>()) {
+          region.has_kernel_launch = true;
+        }
+      }
       static_bindings_.insert(pending_binding);
       region.bindings.push_back(pending_binding);
     }
     region.is_completed = true;
+    if (!region.has_kernel_launch) {
+      pending_bindings_.clear();
+      pending_binding_list_.clear();
+      pending_input_.clear();
+      return;
+    }
+    for (const auto* pending_binding : pending_binding_list_) {
+      binding_to_region_index_[pending_binding] = region_index;
+    }
+    for (const auto* input : pending_input_) {
+      region.AddInput(input);
+    }
     regions_.push_back(region);
     pending_bindings_.clear();
+    pending_binding_list_.clear();
+    pending_input_.clear();
   }
 
   IRModule mod_;
@@ -554,19 +804,137 @@ class CUDAGraphRewritePlanner : public ExprVisitor {
   std::vector<const VarBindingNode*> alloc_storages_;
   std::unordered_set<const VarNode*> static_bindings_;
   std::unordered_set<const VarNode*> pending_bindings_;
+  std::vector<const VarNode*> pending_input_;
+  std::vector<const VarNode*> pending_binding_list_;
   std::vector<Region> regions_;
   std::unordered_map<const VarNode*, int> binding_to_region_index_;
+
+  std::vector<FuncBuilder> regions__;
+  std::unordered_map<const VarNode*, int> binding_to_region_index__;
+};
+
+class CUDAGraphRewriter : public ExprMutator {
+ public:
+  CUDAGraphRewriter(const IRModule& mod) : ExprMutator(mod) {}
+
+  IRModule Rewrite() {
+    CUDAGraphRewritePlanner planner(builder_->GetContextIRModule());
+    auto plans = planner.Plan();
+    // LOG(INFO) << "Plans: " << plans.size();
+    for (const auto& plan : plans) {
+      // LOG(INFO) << "Plan: " << GetRef<Var>(plan.launch_point);
+      plans_[plan.launch_point] = plan;
+    }
+
+    for (const auto& [gv, func] : builder_->GetContextIRModule()->functions) {
+      if (func->IsInstance<FunctionNode>()) {
+        auto new_func = Downcast<Function>(VisitExpr(func));
+        if (!new_func.same_as(func)) {
+          builder_->UpdateFunction(gv, new_func);
+        }
+      }
+    }
+    return builder_->GetContextIRModule();
+  }
+
+  void HandlePlan(const VarBindingNode* op, const RewritePlan& plan) {
+    // LOG(INFO) << "HandlePlan";
+    // emit new binding
+    // set up remap
+    // set up lifted bindings
+    static const auto& call_builtin_with_ctx_op = Op::Get("relax.call_builtin_with_ctx");
+    static const auto& builtin_run_or_capture = ExternFunc("vm.builtin.cuda_graph.run_or_capture");
+    static const auto& builtin_get_cached_alloc =
+        ExternFunc("vm.builtin.cuda_graph.get_cached_alloc");
+
+    Expr launch_subgraph;
+    auto gv_func =
+        builder_->AddFunction(plan.func, plan.is_alloc ? "cuda_graph_alloc" : "cuda_graph_capture");
+    if (plan.is_alloc) {
+      ICHECK(plan.input_args.empty());
+      launch_subgraph = Call(call_builtin_with_ctx_op,
+                             {builtin_get_cached_alloc,
+
+                              Tuple({gv_func, PrimValue(Integer(index_alloc++))})
+
+                             },
+                             Attrs(), {plan.func->ret_struct_info});
+      Expr ret_value = builder_->Emit(launch_subgraph);
+      for (const auto& [output, index] : plan.output_index) {
+        var_redef_[output] = TupleGetItem(ret_value, index);
+      }
+    } else {
+      Array<Expr> args;
+      for (const auto& arg : plan.input_args) {
+        args.push_back(VisitExpr_(arg));
+        // args.push_back(builder_->Emit(arg));
+      }
+      Expr tuple_args = builder_->Emit(Tuple(args));
+      StructInfo ret_sinfo = TupleStructInfo({ObjectStructInfo(), plan.func->ret_struct_info});
+      launch_subgraph = Call(call_builtin_with_ctx_op,
+                             {builtin_run_or_capture,
+                              Tuple({gv_func, tuple_args, PrimValue(Integer(index_capture++))})},
+                             Attrs(), {ret_sinfo});
+
+      Expr ret_value = builder_->Emit(launch_subgraph);
+      for (const auto& [output, index] : plan.output_index) {
+        var_redef_[output] = TupleGetItem(ret_value, index);
+      }
+    }
+
+    for (const auto* binding : plan.lifted_bindings) {
+      LOG(INFO) << "Add lifted binding: " << GetRef<Var>(binding);
+      lifted_bindings_.insert(binding);
+    }
+  }
+
+  void VisitBinding_(const VarBindingNode* op) final {
+    if (plans_.count(op->var.get())) {
+      HandlePlan(op, plans_[op->var.get()]);
+    }
+    // if (var_redef_.count(op->var.get())) {
+    //   auto new_var = builder_->Emit(var_redef_[op->var.get()]);
+    //   var_remap_[op->var->vid] = new_var;
+    //   LOG(INFO) << "ReDef " << op->var;
+    //   return;
+    // }
+    if (lifted_bindings_.count(op->var.get())) {
+      // this binding should be removed
+      LOG(INFO) << "Remove binding " << op->var;
+      return;
+    }
+    LOG(INFO) << "ReEmit " << op->var;
+    ExprMutator::VisitBinding_(op);
+  }
+
+  Expr VisitExpr_(const VarNode* var) {
+    if (var_redef_.count(var) && !var_remap_.count(var->vid)) {
+      auto new_var = builder_->Emit(var_redef_[var], var->name_hint());
+      var_remap_[var->vid] = new_var;
+      return new_var;
+    }
+    return ExprMutator::VisitExpr_(var);
+  }
+
+  std::unordered_map<const VarNode*, RewritePlan> plans_;
+  std::unordered_map<const VarNode*, Expr> var_redef_;
+  std::unordered_set<const VarNode*> lifted_bindings_;
+  int index_alloc = 0;
+  int index_capture = 0;
 };
 
 }  // namespace v2
 
 IRModule RewriteCUDAGraph(IRModule mod) {
-  v2::CUDAGraphRewritePlanner planner(mod);
-  planner.Plan();
+  // v2::CUDAGraphRewritePlanner planner(mod);
+  // planner.Plan();
+  v2::CUDAGraphRewriter rewriter(mod);
+  mod = rewriter.Rewrite();
+  // mod = rewriter.Rewrite();
+  LOG(INFO) << "MMMMMMMM";
+  LOG(INFO) << mod;
   return mod;
   // CUDAGraphRewriter rewriter(mod);
-  // mod = rewriter.Rewrite();
-  // LOG(INFO) << mod;
   // return mod;
 }
 
