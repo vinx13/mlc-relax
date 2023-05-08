@@ -444,19 +444,19 @@ std::string Conv2dOp(std::string id, const Str2StrMap& attrs,
   }
 
   // Initialize CUTLASS kernel with arguments and workspace pointer
-  CutlassPrint(conv2d_decl, "status = conv2d_op.initialize(arguments, workspace.get());\n");
+  CutlassPrint(conv2d_decl, "status = conv2d_op.initialize(arguments, workspace.get(), static_cast<cudaStream_t>(strm));\n");
   CutlassPrint(conv2d_decl, "CHECK(status == cutlass::Status::kSuccess);\n\n");
 
   if (use_split_k) {
     CutlassPrint(
         conv2d_decl,
         "arguments.output_op = {ElementComputeEpilogue(1), ElementComputeEpilogue(0)}; \n");
-    CutlassPrint(conv2d_decl, "status = conv2d_op.update(arguments, workspace.get()); \n");
+    CutlassPrint(conv2d_decl, "status = conv2d_op.update(arguments, workspace.get(), static_cast<cudaStream_t>(strm)); \n");
     CutlassPrint(conv2d_decl, "CHECK(status == cutlass::Status::kSuccess);\n\n");
   }
 
   // Launch initialized CUTLASS kernel
-  CutlassPrint(conv2d_decl, "status = conv2d_op();\n");
+  CutlassPrint(conv2d_decl, "status = conv2d_op(static_cast<cudaStream_t>(strm));\n");
   CutlassPrint(conv2d_decl, "CHECK(status == cutlass::Status::kSuccess);\n\n");
 
   if (use_split_k) {

@@ -319,3 +319,45 @@ TEST(TypedPackedFunc, RValue) {
     tf(1, true);
   }
 }
+
+#include <tvm/tir/expr.h>
+using namespace tvm;
+runtime::ObjectRef CreateObj() {
+  Integer i = Integer(1);
+  return i;
+}
+
+// Test case 1: ArgSetter with rvalue, ref_count = 1
+TEST(PackedFunc, ArgSetter) {
+  TVMValue value;
+  int tcode;
+  runtime::TVMArgsSetter setter(&value, &tcode);
+  setter(0, CreateObj());
+  PackedFunc func([&](TVMArgs args, TVMRetValue* rv) {
+    ICHECK(args.num_args == 1);
+    LOG(INFO) << args[0].operator ObjectRef()->GetTypeKey();
+    // ICHECK(args[0].operator ObjectRef().as<IntImmNode>());
+  });
+  TVMArgs args(&value, &tcode, 1);
+  TVMRetValue rv;
+  func.CallPacked(args, &rv);
+}
+
+TEST(PackedFunc, ArgSetter2) {
+  // now we use an array to hold the reference to ensure object doesn't get destructed
+  Array<runtime::ObjectRef> arr;
+  arr.push_back(CreateObj());
+
+
+  TVMValue value;
+  int tcode;
+  runtime::TVMArgsSetter setter(&value, &tcode);
+  setter(0, arr[0]);
+  PackedFunc func([&](TVMArgs args, TVMRetValue* rv) {
+    ICHECK(args.num_args == 1);
+    LOG(INFO) << args[0].operator ObjectRef()->GetTypeKey();
+  });
+  TVMArgs args(&value, &tcode, 1);
+  TVMRetValue rv;
+  func.CallPacked(args, &rv);
+}

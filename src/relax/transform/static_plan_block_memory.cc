@@ -320,7 +320,7 @@ class StorageAllocatorInit : public StorageAllocatorBaseVisitor {
     // a PrimFunc of the context module.
     // - Otherwise, discard the tokens used by the arguments, as there might be
     // potential external reference.
-    if (IsPrimFuncGlobalVar(call->op)) {
+    if (true || IsPrimFuncGlobalVar(call->op)) {
       ICHECK(!block_stack_.empty());
       for (const Expr& arg : call->args) {
         Tokens tokens = GetTokensWithAllocSiteCheck(arg, block_stack_.back());
@@ -738,7 +738,10 @@ namespace transform {
 Pass StaticPlanBlockMemory() {
   runtime::TypedPackedFunc<Function(Function, IRModule, PassContext)> pass_func =
       [=](Function f, IRModule m, PassContext pc) {
-        return Downcast<Function>(StaticPlanBlockMemory(std::move(f), m));
+        // LOG(INFO) << "BEFORE SPBM:\n" << f;
+        auto res = Downcast<Function>(StaticPlanBlockMemory(std::move(f), m));
+        LOG(INFO) << "After SPBM:\n" << res;
+        return res;
       };
   return CreateFunctionPass(pass_func, /*opt_level=*/0, "StaticPlanBlockMemory", {});
 }

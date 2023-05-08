@@ -296,6 +296,7 @@ String GetCutlassCSource(const String& pattern_name, const String& ext_func_id,
   for (const auto& arg_name : func_args) {
     code_stream_ << "DLTensor* " << arg_name << ", ";
   }
+  code_stream_ << "void* strm,";
   for (size_t i = 0; i < output_types.size() - 1; ++i) {
     code_stream_ << "DLTensor* out" << i << ", ";
   }

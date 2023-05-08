@@ -22,24 +22,14 @@
  * \brief The CUDA graph related builtin functions for Relax virtual machine.
  */
 
-#include <tvm/runtime/container/adt.h>
-#include <tvm/runtime/data_type.h>
-#include <tvm/runtime/device_api.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/runtime/memory.h>
-#include <tvm/runtime/ndarray.h>
 #include <tvm/runtime/packed_func.h>
 #include <tvm/runtime/registry.h>
-#include <tvm/runtime/relax_vm/bytecode.h>
-#include <tvm/runtime/relax_vm/memory_manager.h>
 #include <tvm/runtime/relax_vm/vm.h>
 
 #include "../../cuda/cuda_common.h"
 namespace tvm {
 namespace runtime {
 namespace relax_vm {
-
-using tvm::runtime::NDArray;
 
 /*! \brief Represents a CUDA graph. */
 class CUDAGraphNode : public Object {
@@ -72,48 +62,59 @@ class CUDAGraph : public ObjectRef {
 /*! \brief The cache states of a CUDA graph. */
 class CUDAGraphCache : public Object {
  public:
-  struct Entry {
-    /*! \brief The tensors allocated in the cuda graph */
-    Array<ObjectRef> alloc_storages;
-    /*! \brief Intemediate tensors in the capture func that will be used outside the capture func */
-    Array<ObjectRef> states;
+  struct CaptureResult {
+    /*!
+     * \brief Tuple of intemediate tensors in the capture func that will be used outside the
+     * capture func
+     */
+    ObjectRef states;
     /*! \brief The cuda graph instance */
     CUDAGraph graph;
   };
 
   static CUDAGraphCache* Get() { return dmlc::ThreadLocalStore<CUDAGraphCache>::Get(); }
 
-  /*! \brief Get the captured states of a cuda graph from the cache or run CUDA graph capture
+  /*!
+   * \brief Launch the cuda graph if it has been cached, otherwise execute it in capture mode.
    * \param vm The virutal machine.
-   * \param alloc_func () -> Tuple[Tensor0, ..., TensorN]. The function to allocate tensors.
-   * \param capture_func (Tuple[Tensor0, ..., TensorN]) -> (). The function to capture a cuda graph.
-   * \return The cache entry.
+   * \param capture_func The function of type (args...) -> Tuple[ObjectRef], where 'args' are the
+   * static arguments that are the same for all invocations of the capture function, the returned
+   * tuple contains the intermediate tensors that will be used outside the capture function.
+   * \params args The static arguments of the capture function
+   * \param entry_index The unique index of the capture function used for lookup.
+   * \return The return value of the capture function.
    */
-  Entry GetOrCapture(VirtualMachine* vm, const ObjectRef& capture_func, ObjectRef args, int64_t entry_index) {
-    // TODO(wuwei): use entry_index to speed up the lookup.
-    if (auto it = entries_.find(capture_func); it != entries_.end()) {
-      return it->second;
+  ObjectRef RunOrCapture(VirtualMachine* vm, const ObjectRef& capture_func, ObjectRef args,
+                         int64_t entry_index) {
+    if (auto it = capture_cache_.find(entry_index); it != capture_cache_.end()) {
+      // Launch CUDA graph
+      const auto& [states, cuda_graph] = it->second;
+      cudaGraphExec_t cuda_graph_exec;
+      CUDA_CALL(cudaGraphInstantiate(&cuda_graph_exec, cuda_graph->handle_, NULL, NULL, 0));
+      CUDA_CALL(cudaGraphLaunch(cuda_graph_exec, CUDAThreadEntry::ThreadLocal()->stream));
+      CUDA_CALL(cudaGraphExecDestroy(cuda_graph_exec));
+      return states;
     }
 
     cudaStream_t capture_stream;
     CUDA_CALL(cudaStreamCreate(&capture_stream));
-    CUDAGraphCache::Entry entry;
-
-    // // Invoke the alloc function
-    // TVMArgs alloc_func_args(nullptr, nullptr, 0);
-    // TVMRetValue alloc_func_rv;
-    // vm->InvokeClosurePacked(alloc_func, alloc_func_args, &alloc_func_rv);
-    // entry.alloc_storages = alloc_func_rv;
+    CUDAGraphCache::CaptureResult entry;
 
     // Set up arguments for the graph execution
-    std::vector<TVMValue> values(1);
-    std::vector<int> tcodes(1);
+    Array<ObjectRef> tuple_args = Downcast<Array<ObjectRef>>(args);
+    int nargs = static_cast<int>(tuple_args.size());
+    std::vector<TVMValue> values(nargs);
+    std::vector<int> tcodes(nargs);
     TVMArgsSetter setter(values.data(), tcodes.data());
-    setter(0, args);
-    TVMRetValue capture_func_rv;
+    for (int i = 0; i < nargs; ++i) {
+      ObjectRef arg = tuple_args[i];
+      setter(i, arg);
+    }
 
-    // Warm up run
-    vm->InvokeClosurePacked(capture_func, TVMArgs(values.data(), tcodes.data(), 1),
+    TVMRetValue capture_func_rv;
+    // Run the function without CUDA graph. This is a warm up step to do necessary initialization
+    // of the CUDA module such as loading module data, setting kernel attributes.
+    vm->InvokeClosurePacked(capture_func, TVMArgs(values.data(), tcodes.data(), nargs),
                             &capture_func_rv);
 
     // Run the graph in capture mode
@@ -122,65 +123,67 @@ class CUDAGraphCache : public Object {
     CUDA_CALL(cudaStreamBeginCapture(CUDAThreadEntry::ThreadLocal()->stream,
                                      cudaStreamCaptureModeGlobal));
 
-    vm->InvokeClosurePacked(capture_func, TVMArgs(values.data(), tcodes.data(), 1),
+    vm->InvokeClosurePacked(capture_func, TVMArgs(values.data(), tcodes.data(), nargs),
                             &capture_func_rv);
     entry.states = capture_func_rv;
     CUDA_CALL(cudaStreamEndCapture(CUDAThreadEntry::ThreadLocal()->stream, &graph));
     std::swap(capture_stream, CUDAThreadEntry::ThreadLocal()->stream);
 
     entry.graph = CUDAGraph(graph);
-    entries_[capture_func] = entry;
+    capture_cache_[entry_index] = entry;
     CUDA_CALL(cudaStreamDestroy(capture_stream));
-    return entry;
+    return entry.states;
+  }
+
+  /*!
+   * \brief Get the cached allocation from the cache or run the allocation function.
+   * \param vm The virtual machine.
+   * \param alloc_func The function of type () -> ObjectRef, where the returned object is the
+   * tuple of allocated storage objects.
+   * \param entry_index The unique index of the allocation function used for lookup.
+   */
+  ObjectRef GetCachedAllocation(VirtualMachine* vm, const ObjectRef& alloc_func,
+                                int64_t entry_index) {
+    if (auto it = alloc_cache_.find(entry_index); it != alloc_cache_.end()) {
+      return it->second;
+    }
+    TVMRetValue alloc_func_rv;
+    vm->InvokeClosurePacked(alloc_func, TVMArgs(nullptr, nullptr, 0), &alloc_func_rv);
+    ObjectRef alloc_result = alloc_func_rv;
+    alloc_cache_[entry_index] = alloc_result;
+    return alloc_result;
   }
 
  private:
-  /*! \brief The cache entries. The key is the (unique) function for the CUDA graph capture.
-   * The value is the cached allocations and the captured CUDA graph instance.
-   *
-   * @TODO(wuwei): refacotr to use global index to speed up the lookup.
+  /*!
+   * \brief The cache of captured cuda graphs. The key is a unique index for the capture function.
+   * The value is the result of the capture.
    */
-  std::unordered_map<ObjectRef, Entry, ObjectPtrHash, ObjectPtrEqual> entries_;
+  std::unordered_map<int64_t, CaptureResult> capture_cache_;
+  /*!
+   * \brief The cache of allocations. The key is a unique index for the allocation function.
+   * The value is the cached allocations, which is a tuple of storages.
+   */
+  std::unordered_map<int64_t, ObjectRef> alloc_cache_;
 };
 
-TVM_REGISTER_GLOBAL("vm.builtin.get_captured_cuda_graph")
+TVM_REGISTER_GLOBAL("vm.builtin.cuda_graph.run_or_capture")
+    .set_body_typed([](TVMArgValue vm_ptr, ObjectRef capture_func, ObjectRef func_args,
+                       int64_t entry_index) {
+      VirtualMachine* vm = VirtualMachine::GetContextPtr(vm_ptr);
+      CUDAGraphCache* cache = CUDAGraphCache::Get();
+      return cache->RunOrCapture(vm, capture_func, func_args, entry_index);
+    });
+
+TVM_REGISTER_GLOBAL("vm.builtin.cuda_graph.get_cached_alloc")
     .set_body([](TVMArgs args, TVMRetValue* rv) {
       ICHECK_EQ(args.size(), 3);
       VirtualMachine* vm = VirtualMachine::GetContextPtr(args[0]);
-      // ObjectRef alloc_func = args[1];  // () -> Tuple[Tensor0, ... TensorN]
-      ObjectRef capture_func =
-          args[1];  // (Tuple[Tensor0, ... TensorN]) -> Tuple[Tensor0, ... TensorN']
-      ObjectRef func_args = args[2];
-      int64_t entry_index = args[3];
-
+      ObjectRef alloc_func = args[1];
+      int64_t entry_index = args[2];
       CUDAGraphCache* cache = CUDAGraphCache::Get();
-      auto cached = cache->GetOrCapture(vm, capture_func, func_args, entry_index);
-      *rv = Array<ObjectRef>{cached.graph, cached.alloc_storages, cached.states};
+      *rv = cache->GetCachedAllocation(vm, alloc_func, entry_index);
     });
-
-TVM_REGISTER_GLOBAL("vm.builtin.cuda_graph_launch").set_body_typed([](CUDAGraph cuda_graph) {
-  cudaGraphExec_t cuda_graph_exec;
-  CUDA_CALL(cudaGraphInstantiate(&cuda_graph_exec, cuda_graph->handle_, NULL, NULL, 0));
-  CUDA_CALL(cudaGraphLaunch(cuda_graph_exec, CUDAThreadEntry::ThreadLocal()->stream));
-  CUDA_CALL(cudaGraphExecDestroy(cuda_graph_exec));
-});
-
-using ExecutionCache = dmlc::ThreadLocalStore<std::unordered_map<int64_t, ObjectRef>>;
-
-TVM_REGISTER_GLOBAL("vm.builtin.run_cached").set_body([](TVMArgs args, TVMRetValue* rv) {
-  ICHECK_EQ(args.size(), 3);
-  VirtualMachine* vm = VirtualMachine::GetContextPtr(args[0]);
-  ObjectRef func = args[1];
-  int64_t entry_index = args[2];
-  auto* cache = ExecutionCache::Get();
-  if (cache->count(entry_index)) {
-    *rv = (*cache)[entry_index];
-    return;
-  }
-  TVMArgs func_args(nullptr, nullptr, 0);
-  vm->InvokeClosurePacked(func, func_args, rv);
-  (*cache)[entry_index] = *rv;
-});
 
 }  // namespace relax_vm
 }  // namespace runtime

@@ -584,6 +584,7 @@ def cutlass_codegen_gemm(
         bias_arg = "{c, ldc}"
 
     text = f"""
+      // AAA
       #define CUTLASS_ENABLE_CUBLAS 1
       #define CUTLASS_NAMESPACE cutlass
       #define CUTLASS_ENABLE_TENSOR_CORE_MMA 1
@@ -604,13 +605,14 @@ def cutlass_codegen_gemm(
       #include <tvm/runtime/logging.h>
       #include <tvm/runtime/ndarray.h>
       #include <tvm/runtime/packed_func.h>
+      #include <tvm/runtime/registry.h>
 
       namespace {{
 
       using namespace tvm;
       using namespace tvm::runtime;
 
-      void _GEMM(NDArray A, NDArray B, {bias_param}NDArray C) {{
+      void _GEMM(NDArray A, NDArray B, {bias_param} void* strm, NDArray C) {{
         // A: [M, K], B: [K, N]
         CHECK_EQ(A->ndim, 2);
         CHECK_EQ(B->ndim, 2);
@@ -633,6 +635,10 @@ def cutlass_codegen_gemm(
         {typea}* a = reinterpret_cast<{typea}*>(A->data);
         {typeb}* b = reinterpret_cast<{typeb}*>(B->data);
         {typec}* c = reinterpret_cast<{typec}*>(C->data);
+        auto func = Registry::Get("runtime.get_cuda_stream");
+        ICHECK(func != nullptr);
+        cudaStream_t stream = static_cast<cudaStream_t>((*func)().operator void*());
+        // TVMF
         cutlass::Status status = gemm_op({{
             {{M, N, K}},     //
             {{a, lda}},      //
@@ -640,8 +646,8 @@ def cutlass_codegen_gemm(
             {bias_arg},      //
             {{c, ldc}},      //
             {{alpha, beta}}  //
-        }});
-        CHECK(status == cutlass::Status::kSuccess);
+        }}, nullptr, stream);
+        CHECK(status==cutlass::Status::kSuccess) << cutlass::cutlassGetStatusString(status);
       }}
 
       }}  // namespace
@@ -712,7 +718,7 @@ namespace {{
 using namespace tvm;
 using namespace tvm::runtime;
 
-void _BHGEMM(NDArray A, NDArray B, NDArray Bias, NDArray D, NDArray C) {{
+void _BHGEMM(NDArray A, NDArray B, NDArray Bias, NDArray D, void* strm, NDArray C) {{
     // A: [Batch, M, K], B: [1, K, N]/[K, N], Bias: [1, N]/[N], D: [Batch, M, N], C: [Batch, M, N]
     CHECK_EQ(A->ndim, 3);
     int bdim = B->ndim;
@@ -745,16 +751,16 @@ void _BHGEMM(NDArray A, NDArray B, NDArray Bias, NDArray D, NDArray C) {{
     a_size *= A->shape[0];
     a_size *= A->shape[1];
     a_size *= A->shape[2];
-    
+
     int64_t b_size = 1;
     b_size *= B->shape[bias_dim - 2];
     b_size *= B->shape[bias_dim - 1];
-    
+
     int64_t c_size = 1;
     c_size *= C->shape[0];
     c_size *= C->shape[1];
     c_size *= C->shape[2];
-    
+
     // Define the GEMM operation
     {cutlass_op_def}
     using ElementComputeEpilogue = typename {op_name}::ElementAccumulator;
@@ -791,11 +797,11 @@ void _BHGEMM(NDArray A, NDArray B, NDArray Bias, NDArray D, NDArray C) {{
     cutlass::Status status = gemm_op.can_implement(arguments);
     CHECK(status == cutlass::Status::kSuccess);
 
-    status = gemm_op.initialize(arguments, workspace.get());
+    status = gemm_op.initialize(arguments, workspace.get(), static_cast<cudaStream_t>(strm));
     CHECK(status == cutlass::Status::kSuccess);
 
-    status = gemm_op();
-    CHECK(status == cutlass::Status::kSuccess);
+    status = gemm_op(static_cast<cudaStream_t>(strm));
+    CHECK(status == cutlass::Status::kSuccess) << cutlass::cutlassGetStatusString(status);
     return;
 }}
 
@@ -845,13 +851,13 @@ TVM_DLL_EXPORT_TYPED_FUNC({{global_symbol}}, _BHGEMM);
       #include <tvm/runtime/logging.h>
       #include <tvm/runtime/ndarray.h>
       #include <tvm/runtime/packed_func.h>
-      
+
       namespace {{
 
       using namespace tvm;
       using namespace tvm::runtime;
 
-      void _BHGEMM(NDArray A, NDArray B, {bias_param}NDArray C) {{
+      void _BHGEMM(NDArray A, NDArray B, {bias_param} void*strm, NDArray C) {{
         // A: [Batch, M, K], B: [K, N], C: [Batch, M, N]
         CHECK_EQ(A->ndim, 3);
         int bdim = B->ndim;
@@ -890,8 +896,8 @@ TVM_DLL_EXPORT_TYPED_FUNC({{global_symbol}}, _BHGEMM);
             batch_stride_C,   //
             {{alpha, beta}},  //
             Batch             //
-        }});
-        CHECK(status == cutlass::Status::kSuccess);
+        }}, nullptr, static_cast<cudaStream_t>(strm));
+        CHECK(status == cutlass::Status::kSuccess) << cutlass::cutlassGetStatusString(status);
       }}
 
       }}  // namespace

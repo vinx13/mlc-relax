@@ -712,6 +712,11 @@ class SplitMutator : public ExprMutator {
       // split the function into two functions, one for the library kernel and one for the rest.
       std::pair<tir::PrimFunc, Optional<tir::PrimFunc>> split_funcs =
           tir::SplitFunctions(func, &arg_partition, patterns_, fcodegen_);
+      const Op& call_builtin_with_ctx_op_ = Op::Get("relax.call_builtin_with_ctx");
+      Expr strm =
+          builder_->Emit(Call(call_builtin_with_ctx_op_,
+                              {ExternFunc("vm.builtin.get_cuda_stream"), Tuple(Array<Expr>{})},
+                              Attrs(), Array<StructInfo>{ObjectStructInfo()}));
       if (!split_funcs.second.defined()) {
         // no need to split, the function itself a library kernel
         tvm::BaseFunc lib_func = CodegenWithLibrary(split_funcs.first.get(), gv->name_hint);
@@ -721,7 +726,9 @@ class SplitMutator : public ExprMutator {
         builder_->UpdateFunction(gv, lib_func);
         // emit the call to the library kernel
         ObjectPtr<CallNode> new_call = make_object<CallNode>(*call.operator->());
-        new_call->args = {lib_func, call->args[1]};
+        Tuple args = Downcast<Tuple>(call->args[1]);
+        args.CopyOnWrite()->fields.push_back(strm);
+        new_call->args = {lib_func, args};
         return Call(new_call);
       }
       tir::PrimFunc func1 = tir::RenewDefs(split_funcs.first);
@@ -732,6 +739,7 @@ class SplitMutator : public ExprMutator {
       for (int p : arg_partition[0]) {
         args1.push_back(GetCallTIRArgs(call->args[1])[p]);
       }
+      args1.push_back(strm);
       // replace the function in the module with the library kernel
       tvm::BaseFunc lib_func = CodegenWithLibrary(func1.get(), gv->name_hint);
       if (lib_func->IsInstance<tir::PrimFuncNode>()) return GetRef<Call>(op);

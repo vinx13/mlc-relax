@@ -333,6 +333,9 @@ TVM_REGISTER_GLOBAL("relax.analysis.post_order_visit").set_body_typed([](Expr ex
 StructInfo ExprMutatorBase::VisitExprDepStructInfoField(const StructInfo& struct_info) {
   // recurse into struct info in case they depend on value
   // under the current scope.
+  ShapeExpr shape(Array<PrimExpr>{Integer(1)});
+  this->VisitExpr_(shape.get());
+  default_struct_info_field_mutator_.VisitStructInfoExprField(shape);
   return default_struct_info_field_mutator_.VisitStructInfo(struct_info);
 }
 
